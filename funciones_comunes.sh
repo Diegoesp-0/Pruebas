@@ -72,7 +72,14 @@ configurar_ip_estatica(){
 
 	echo "Configurando IP estatica $ip/24 en $interfaz..."
 
-	sudo ip addr replace "$ip/24" dev "$interfaz"
+	# Eliminar todas las IPs IPv4 existentes en la interfaz antes de agregar la nueva
+	local ips_actuales
+	ips_actuales=$(ip -4 addr show dev "$interfaz" 2>/dev/null | grep "inet " | awk '{print $2}')
+	for ip_vieja in $ips_actuales; do
+		sudo ip addr del "$ip_vieja" dev "$interfaz" 2>/dev/null
+	done
+
+	sudo ip addr add "$ip/24" dev "$interfaz"
 	sudo ip link set "$interfaz" up
 
 	if [[ $? -eq 0 ]]; then
