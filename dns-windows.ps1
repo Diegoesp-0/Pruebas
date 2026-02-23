@@ -1,111 +1,138 @@
-$DNS_FILE          = $PSCommandPath
-$DOMINIO           = "reprobados.com"
+# ==================== DNS - WINDOWS ====================
+# Cargado por main-windows.ps1. NO ejecutar directamente.
+
+$DNS_FILE           = $PSCommandPath
+$DOMINIO            = "reprobados.com"
 $DOMINIOS_GUARDADOS = @("reprobados.com")
 
 # ==================== FUNCIONES DNS ====================
 
 function dns_guardar_dominio {
-    Guardar-Variable-EnArchivo $DNS_FILE "DOMINIO" $script:DOMINIO
+    $c = Get-Content $DNS_FILE -Raw
+    $c = $c -replace '(?m)^\$DOMINIO\s*=\s*"[^"]*"', "`$DOMINIO            = `"$script:DOMINIO`""
+    Set-Content $DNS_FILE $c -Encoding UTF8
 }
 
 function dns_guardar_lista_dominios {
-    Guardar-Array-EnArchivo $DNS_FILE "DOMINIOS_GUARDADOS" $script:DOMINIOS_GUARDADOS
+    $linea = '$DOMINIOS_GUARDADOS = @(' + (($DOMINIOS_GUARDADOS | ForEach-Object { '"' + $_ + '"' }) -join ', ') + ')'
+    $c = Get-Content $DNS_FILE -Raw
+    $c = $c -replace '(?m)^\$DOMINIOS_GUARDADOS\s*=\s*@\([^)]*\)', $linea
+    Set-Content $DNS_FILE $c -Encoding UTF8
 }
 
-function dns_verificar { Instalar-Rol "DNS" }
+function dns_verificar {
+    Clear-Host
+    if (Rol-Instalado "DNS") {
+        Write-Host ""
+        Write-Host "El DNS ya esta instalado"
+        Write-Host ""
+        Start-Sleep 2
+    } else {
+        Write-Host ""
+        Write-Host "El DNS no esta instalado"
+        Write-Host ""
+        $opc = Read-Host "Quieres instalar el rol DNS? (S/s)"
+        if ($opc -eq "S" -or $opc -eq "s") {
+            Clear-Host
+            Write-Host ""
+            Write-Host "Instalando DNS..."
+            Install-WindowsFeature -Name DNS -IncludeManagementTools | Out-Null
+            Write-Host "Instalacion completada"
+            Write-Host ""
+        }
+    }
+    Pausa
+}
 
-function dns_ipfija { Configurar-IPFija-Interactivo }
+function dns_ipfija {
+    Clear-Host
+    Configurar-IPFija-Interactivo
+    Pausa
+}
 
-function dns_iniciar { Iniciar-Servicio-Windows "DNS" }
+function dns_iniciar {
+    $svc = Get-Service -Name DNS -ErrorAction SilentlyContinue
+    if ($svc -and $svc.Status -eq "Running") {
+        Clear-Host
+        Write-Host ""
+        Write-Host "El servidor ya esta corriendo"
+        Write-Host ""
+        Start-Sleep 2
+    } else {
+        Clear-Host
+        Set-Service -Name DNS -StartupType Automatic
+        Start-Service -Name DNS
+        Write-Host ""
+        Write-Host "Iniciando servicio..."
+        Write-Host ""
+        $svc = Get-Service -Name DNS
+        if ($svc.Status -eq "Running") {
+            Write-Host "Servicio iniciado correctamente"
+        } else {
+            Write-Host "Error al iniciar el servicio"
+        }
+    }
+    Pausa
+}
 
 function dns_configurar_zona {
     Clear-Host
+
     if (-not (Rol-Instalado "DNS")) {
-        Write-Host "`nERROR: Instale el rol DNS primero (opcion 1).`n"; Pausa; return
+        Write-Host ""; Write-Host "ERROR: Instale el rol DNS primero (opcion 1)."; Write-Host ""
+        Pausa; return
     }
 
     $IP_SERVER = (Get-NetIPAddress -AddressFamily IPv4 |
                   Where-Object { $_.IPAddress -notmatch "^127\." } |
                   Select-Object -First 1).IPAddress
+
     if (-not $IP_SERVER) {
-        Write-Host "`nERROR: No se pudo obtener la IP del servidor.`n"; Pausa; return
+        Write-Host ""; Write-Host "ERROR: No se pudo obtener la IP del servidor."; Write-Host ""
+        Pausa; return
     }
 
-    Write-Host "IP del servidor: $IP_SERVER`n"
+    # Deshabilitar firewall para evitar bloqueos
+    Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False -ErrorAction SilentlyContinue
 
-    $IP_CLIENTE = ""
     do {
         Write-Host "=============== IP CLIENTE =============="
-        $IP_CLIENTE = Read-Host "IP a la que apuntara el dominio [$DOMINIO]"
+        Write-Host ""
+        $IP_CLIENTE = Read-Host "Ingrese la IP a la que apuntara el Dominio"
         if (-not (Validar-IP $IP_CLIENTE)) {
-            Clear-Host; Write-Host "`nIP invalida.`n"; Start-Sleep 2
+            Clear-Host
+            Write-Host ""
+            Write-Host "La IP del cliente no es valida"
+            Write-Host ""
+            Start-Sleep 2
         }
     } while (-not (Validar-IP $IP_CLIENTE))
 
-    # Deshabilitar firewall
-    Write-Host "Desactivando firewall..."
-    Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False -ErrorAction SilentlyContinue
-
-    # Crear zona si no existe
     $zona = Get-DnsServerZone -Name $DOMINIO -ErrorAction SilentlyContinue
     if (-not $zona) {
         Add-DnsServerPrimaryZone -Name $DOMINIO -ZoneFile "$DOMINIO.dns" -DynamicUpdate None
-        Write-Host "Zona '$DOMINIO' creada."
-    } else {
-        Write-Host "Zona '$DOMINIO' ya existe, actualizando registros."
     }
 
-    # Limpiar registros anteriores
     Remove-DnsServerResourceRecord -ZoneName $DOMINIO -Name "@"   -RRType A     -Force -ErrorAction SilentlyContinue
-    Remove-DnsServerResourceRecord -ZoneName $DOMINIO -Name "www" -RRType CNAME -Force -ErrorAction SilentlyContinue
     Remove-DnsServerResourceRecord -ZoneName $DOMINIO -Name "www" -RRType A     -Force -ErrorAction SilentlyContinue
+    Remove-DnsServerResourceRecord -ZoneName $DOMINIO -Name "www" -RRType CNAME -Force -ErrorAction SilentlyContinue
     Remove-DnsServerResourceRecord -ZoneName $DOMINIO -Name "ns1" -RRType A     -Force -ErrorAction SilentlyContinue
 
-    # Crear registros
     Add-DnsServerResourceRecordA     -ZoneName $DOMINIO -Name "ns1" -IPv4Address $IP_SERVER
     Add-DnsServerResourceRecordA     -ZoneName $DOMINIO -Name "@"   -IPv4Address $IP_CLIENTE
     Add-DnsServerResourceRecordCName -ZoneName $DOMINIO -Name "www" -HostNameAlias "$DOMINIO."
 
     Restart-Service -Name DNS
-    Start-Sleep 2
-
-    if (Verificar-Servicio "DNS") {
-        Write-Host "`nZona [$DOMINIO] configurada correctamente."
-        Write-Host "IP servidor : $IP_SERVER"
-        Write-Host "IP cliente  : $IP_CLIENTE`n"
-    } else {
-        Write-Host "`nERROR: El servicio DNS no pudo reiniciarse.`n"
-    }
+    Write-Host ""
+    Write-Host "Zona configurada y servicio reiniciado"
     Pausa
 }
 
 function dns_validar {
     Clear-Host
-    Write-Host "========== VALIDAR CONFIGURACION DNS ==========`n"
-
-    Write-Host "--- Estado del servicio ---"
-    if (Verificar-Servicio "DNS") {
-        Write-Host "DNS: ACTIVO`n"
-    } else {
-        Write-Host "DNS: INACTIVO — use opcion 3 para iniciarlo`n"; Pausa; return
-    }
-
-    Write-Host "--- Zona [$DOMINIO] ---"
-    $zona = Get-DnsServerZone -Name $DOMINIO -ErrorAction SilentlyContinue
-    if ($zona) {
-        Write-Host "Zona encontrada: $DOMINIO"
-        Get-DnsServerResourceRecord -ZoneName $DOMINIO -ErrorAction SilentlyContinue |
-            Where-Object { $_.RecordType -in @("A","CNAME","NS","SOA") } |
-            Format-Table -Property Name, RecordType, RecordData -AutoSize
-    } else {
-        Write-Host "Zona '$DOMINIO' no encontrada — configure la zona primero`n"; Pausa; return
-    }
-
-    Write-Host "`n--- Resolucion DNS ---"
+    Write-Host "Probando resolucion DNS..."
     nslookup $DOMINIO 127.0.0.1
-    nslookup "www.$DOMINIO" 127.0.0.1
-
-    Write-Host "`n--- Ping (informativo) ---"
+    Write-Host "Probando ping..."
     ping -n 3 "www.$DOMINIO"
     Pausa
 }
@@ -113,36 +140,50 @@ function dns_validar {
 function dns_menu_dominios {
     while ($true) {
         Clear-Host
-        Write-Host "======= SELECCIONAR DOMINIO ======="
-        Write-Host "`n  Dominio activo: $DOMINIO`n"
+        Write-Host "========================================="
+        Write-Host "         SELECCIONAR DOMINIO"
+        Write-Host "========================================="
+        Write-Host ""
+        Write-Host "  Dominio activo: $DOMINIO"
+        Write-Host ""
         for ($i = 0; $i -lt $DOMINIOS_GUARDADOS.Count; $i++) {
             Write-Host "  $($i+1). $($DOMINIOS_GUARDADOS[$i])"
         }
-        Write-Host "`n  A. Agregar dominio"
-        Write-Host "  0. Volver`n"
+        Write-Host ""
+        Write-Host "  A. Agregar dominio"
+        Write-Host "  0. Volver"
+        Write-Host ""
         $opc = Read-Host "Seleccione una opcion"
 
         if ($opc -eq "0") {
             break
         } elseif ($opc -eq "A" -or $opc -eq "a") {
-            $nuevoDom = Read-Host "`nNuevo dominio (ej: midominio.com)"
+            Write-Host ""
+            $nuevoDom = Read-Host "Ingrese el nuevo dominio (ej: midominio.com)"
             if ([string]::IsNullOrWhiteSpace($nuevoDom)) {
-                Write-Host "No puede estar vacio."; Start-Sleep 2; continue
+                Write-Host "El dominio no puede estar vacio"
+                Start-Sleep 2
+                continue
             }
             if ($DOMINIOS_GUARDADOS -contains $nuevoDom) {
-                Write-Host "El dominio [$nuevoDom] ya existe."; Start-Sleep 2
+                Write-Host "El dominio [$nuevoDom] ya existe en la lista"
+                Start-Sleep 2
             } else {
                 $script:DOMINIOS_GUARDADOS += $nuevoDom
                 dns_guardar_lista_dominios
-                Write-Host "Dominio [$nuevoDom] guardado."; Start-Sleep 2
+                Write-Host "Dominio [$nuevoDom] agregado"
+                Start-Sleep 2
             }
         } elseif ($opc -match '^\d+$' -and [int]$opc -ge 1 -and [int]$opc -le $DOMINIOS_GUARDADOS.Count) {
             $script:DOMINIO = $DOMINIOS_GUARDADOS[[int]$opc - 1]
             dns_guardar_dominio
-            Write-Host "`nDominio seleccionado: $DOMINIO"; Start-Sleep 2
+            Write-Host ""
+            Write-Host "Dominio seleccionado: $DOMINIO"
+            Start-Sleep 2
             break
         } else {
-            Write-Host "Opcion invalida."; Start-Sleep 2
+            Write-Host "Opcion invalida"
+            Start-Sleep 2
         }
     }
 }
@@ -150,22 +191,25 @@ function dns_menu_dominios {
 function dns_menu {
     while ($true) {
         Clear-Host
-        $estado = if (Verificar-Servicio "DNS") { "ACTIVO" } else { "INACTIVO" }
+        $svc    = Get-Service -Name DNS -ErrorAction SilentlyContinue
+        $estado = if ($svc -and $svc.Status -eq 'Running') { "ACTIVO" } else { "INACTIVO" }
+
         Write-Host "========================================="
-        Write-Host "      CONFIGURACION DNS - WINDOWS        "
+        Write-Host "         CONFIGURADOR DNS                "
         Write-Host "========================================="
         Write-Host ""
-        Write-Host "  Dominio activo : $DOMINIO"
-        Write-Host "  Servicio DNS   : $estado"
+        Write-Host "  Dominio activo: $DOMINIO"
+        Write-Host "  Servicio DNS  : $estado"
         Write-Host ""
         Write-Host "  1. Verificar instalacion"
-        Write-Host "  2. Configurar IP fija"
+        Write-Host "  2. IP fija"
         Write-Host "  3. Iniciar servicio"
         Write-Host "  4. Configurar zona"
-        Write-Host "  5. Validar configuracion"
-        Write-Host "  6. Seleccionar / agregar dominio"
+        Write-Host "  5. Validar"
+        Write-Host "  6. Seleccionar dominio"
         Write-Host "  0. Volver"
-        Write-Host ""
+        Write-Host "-----------------------------------------"
+
         $op = Read-Host "Seleccione una opcion"
         switch ($op) {
             "1" { dns_verificar       }
@@ -175,7 +219,7 @@ function dns_menu {
             "5" { dns_validar         }
             "6" { dns_menu_dominios   }
             "0" { return              }
-            default { Write-Host "Opcion invalida."; Start-Sleep 1 }
+            default { Write-Host "Opcion invalida"; Start-Sleep 2 }
         }
     }
 }
