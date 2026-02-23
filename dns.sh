@@ -1,6 +1,8 @@
 #!/bin/bash
 
-source "$(dirname "$0")/funciones_comunes.sh"
+DNS_FILE="$(realpath "${BASH_SOURCE[0]}")"
+
+source "$(dirname "$DNS_FILE")/funciones_comunes.sh"
 
 # ==================== VARIABLES DNS ====================
 
@@ -219,7 +221,7 @@ dns_guardar_dominios(){
 	NUEVA_LISTA="${NUEVA_LISTA% })"
 	local script_real
 	script_real=$(realpath "$0")
-	sed -i "s|^\tlocal DOMINIOS=(.*|${NUEVA_LISTA}|" "$script_real"
+	sed -i "s|^\tlocal DOMINIOS=(.*|${NUEVA_LISTA}|" "$DNS_FILE"
 }
 
 dns_menu_dominios(){
@@ -263,7 +265,7 @@ dns_menu_dominios(){
 		     [[ "$OPC_DOM" -ge 1 ]] && \
 		     [[ "$OPC_DOM" -le "${#DOMINIOS[@]}" ]]; then
 			DOMINIO="${DOMINIOS[$((OPC_DOM-1))]}"
-			sed -i "s/^DOMINIO=.*/DOMINIO=\"$DOMINIO\"/" "$(realpath "$0")"
+			sed -i "s/^DOMINIO=.*/DOMINIO=\"$DOMINIO\"/" "$DNS_FILE"
 			echo ""; echo "Dominio seleccionado: $DOMINIO"; sleep 2
 			break
 		else
