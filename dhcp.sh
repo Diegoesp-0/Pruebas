@@ -1,6 +1,11 @@
 #!/bin/bash
 
-source "$(dirname "$0")/funciones_comunes.sh"
+# Capturar la ruta real de este archivo al momento del source.
+# Necesario porque cuando main.sh hace "source dhcp.sh",
+# $0 apunta a main.sh y los sed -i guardarian en el archivo equivocado.
+DHCP_FILE="$(realpath "${BASH_SOURCE[0]}")"
+
+source "$(dirname "$DHCP_FILE")/funciones_comunes.sh"
 
 # ==================== VARIABLES DHCP ====================
 
@@ -218,14 +223,14 @@ dhcp_conf_parametros(){
 		echo "Cancelado."; sleep 1; return 0
 	fi
 
-	sed -i "s/^SCOPE=.*/SCOPE=$SCOPE_T/"           "$0"
-	sed -i "s/^IPINICIAL=.*/IPINICIAL=$INICIAL_T/" "$0"
-	sed -i "s/^IPFINAL=.*/IPFINAL=$FINAL_T/"       "$0"
-	sed -i "s/^GATEWAY=.*/GATEWAY=$GATEWAY_T/"     "$0"
-	sed -i "s/^DNS=.*/DNS=$DNS_T/"                 "$0"
-	sed -i "s/^DNS2=.*/DNS2=$DNS2_T/"              "$0"
-	sed -i "s/^LEASE=.*/LEASE=$LEASE_T/"           "$0"
-	sed -i "s/^MASCARA=.*/MASCARA=$MASCARA_T/"     "$0"
+	sed -i "s/^SCOPE=.*/SCOPE=$SCOPE_T/"           "$DHCP_FILE"
+	sed -i "s/^IPINICIAL=.*/IPINICIAL=$INICIAL_T/" "$DHCP_FILE"
+	sed -i "s/^IPFINAL=.*/IPFINAL=$FINAL_T/"       "$DHCP_FILE"
+	sed -i "s/^GATEWAY=.*/GATEWAY=$GATEWAY_T/"     "$DHCP_FILE"
+	sed -i "s/^DNS=.*/DNS=$DNS_T/"                 "$DHCP_FILE"
+	sed -i "s/^DNS2=.*/DNS2=$DNS2_T/"              "$DHCP_FILE"
+	sed -i "s/^LEASE=.*/LEASE=$LEASE_T/"           "$DHCP_FILE"
+	sed -i "s/^MASCARA=.*/MASCARA=$MASCARA_T/"     "$DHCP_FILE"
 
 	echo ""
 	echo "Parametros guardados correctamente."
