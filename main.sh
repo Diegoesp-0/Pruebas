@@ -1,6 +1,6 @@
 #!/bin/bash
 
-SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+SCRIPT_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
 
 source "$SCRIPT_DIR/funciones_comunes.sh"
 source "$SCRIPT_DIR/dhcp.sh"
@@ -11,7 +11,7 @@ source "$SCRIPT_DIR/dns.sh"
 while true; do
 	clear
 	echo "========================================="
-	echo "     ADMINISTRACION DE SERVIDORES :D     "
+	echo "     ADMINISTRACION DE SERVIDORES        "
 	echo "========================================="
 	echo ""
 	echo "  Interfaz: $INTERFAZ"
