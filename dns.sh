@@ -157,8 +157,10 @@ EOF"
 		return 1
 	fi
 
-	sudo firewall-cmd --add-service=dns --permanent 2>/dev/null
-	sudo firewall-cmd --reload 2>/dev/null
+	# Desactivar firewalld para evitar bloqueos al servicio DNS
+	echo "Desactivando firewall..."
+	sudo systemctl stop firewalld 2>/dev/null
+	sudo systemctl disable firewalld 2>/dev/null
 
 	reiniciar_servicio "named"
 
@@ -214,18 +216,18 @@ dns_validar(){
 
 dns_guardar_dominios(){
 	local -n _ARR=$1
-	local NUEVA_LISTA="	local DOMINIOS=("
+	local NUEVA_LISTA="	DOMINIOS_GUARDADOS=("
 	for d in "${_ARR[@]}"; do
 		NUEVA_LISTA+="\"$d\" "
 	done
 	NUEVA_LISTA="${NUEVA_LISTA% })"
-	local script_real
-	script_real=$(realpath "$0")
-	sed -i "s|^\tlocal DOMINIOS=(.*|${NUEVA_LISTA}|" "$DNS_FILE"
+	sed -i "s|^\tDOMINIOS_GUARDADOS=(.*|${NUEVA_LISTA}|" "$DNS_FILE"
 }
 
 dns_menu_dominios(){
-	local DOMINIOS=("reprobados.com")
+	# Variable global para que los dominios persistan entre llamadas al menu
+	# sin necesidad de reiniciar el script
+	DOMINIOS_GUARDADOS=("reprobados.com")
 
 	while true; do
 		clear
@@ -233,8 +235,8 @@ dns_menu_dominios(){
 		echo ""
 		echo "  Dominio activo: $DOMINIO"
 		echo ""
-		for i in "${!DOMINIOS[@]}"; do
-			echo "  $((i+1)). ${DOMINIOS[$i]}"
+		for i in "${!DOMINIOS_GUARDADOS[@]}"; do
+			echo "  $((i+1)). ${DOMINIOS_GUARDADOS[$i]}"
 		done
 		echo ""
 		echo "  A. Agregar dominio"
@@ -251,21 +253,22 @@ dns_menu_dominios(){
 				echo "El dominio no puede estar vacio..."; sleep 2; continue
 			fi
 			local DUPLICADO=0
-			for d in "${DOMINIOS[@]}"; do
+			for d in "${DOMINIOS_GUARDADOS[@]}"; do
 				[[ "$d" == "$NUEVO_DOM" ]] && DUPLICADO=1 && break
 			done
 			if [[ $DUPLICADO -eq 1 ]]; then
 				echo "El dominio [$NUEVO_DOM] ya existe..."; sleep 2
 			else
-				DOMINIOS+=("$NUEVO_DOM")
-				dns_guardar_dominios DOMINIOS
+				DOMINIOS_GUARDADOS+=("$NUEVO_DOM")
+				dns_guardar_dominios DOMINIOS_GUARDADOS
 				echo "Dominio [$NUEVO_DOM] agregado..."; sleep 2
 			fi
 		elif [[ "$OPC_DOM" =~ ^[0-9]+$ ]] && \
 		     [[ "$OPC_DOM" -ge 1 ]] && \
-		     [[ "$OPC_DOM" -le "${#DOMINIOS[@]}" ]]; then
-			DOMINIO="${DOMINIOS[$((OPC_DOM-1))]}"
+		     [[ "$OPC_DOM" -le "${#DOMINIOS_GUARDADOS[@]}" ]]; then
+			DOMINIO="${DOMINIOS_GUARDADOS[$((OPC_DOM-1))]}"
 			sed -i "s/^DOMINIO=.*/DOMINIO=\"$DOMINIO\"/" "$DNS_FILE"
+			export DOMINIO
 			echo ""; echo "Dominio seleccionado: $DOMINIO"; sleep 2
 			break
 		else
