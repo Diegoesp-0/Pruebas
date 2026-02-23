@@ -1,6 +1,10 @@
 #!/bin/bash
 
+# ==================== VARIABLES COMUNES ====================
+
 INTERFAZ="enp0s8"
+
+# ==================== FUNCIONES COMUNES ====================
 
 validar_ip(){
 	local ip=$1
@@ -68,8 +72,7 @@ configurar_ip_estatica(){
 
 	echo "Configurando IP estatica $ip/24 en $interfaz..."
 
-	sudo ip addr flush dev "$interfaz" 2>/dev/null
-	sudo ip addr add "$ip/24" dev "$interfaz"
+	sudo ip addr replace "$ip/24" dev "$interfaz"
 	sudo ip link set "$interfaz" up
 
 	if [[ $? -eq 0 ]]; then
