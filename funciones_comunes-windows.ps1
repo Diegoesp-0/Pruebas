@@ -74,6 +74,8 @@ function Reiniciar-Servicio-Windows([string]$nombre) {
     Pausa
 }
 
+# ==================== RED ====================
+
 function IP-Num([string]$ip) {
     $p = $ip.Split('.')
     return ([int]$p[0]*16777216)+([int]$p[1]*65536)+([int]$p[2]*256)+[int]$p[3]
@@ -123,9 +125,17 @@ function Configurar-IP-Estatica([string]$ipFija, [string]$mascara = "255.255.255
     $gateway = (Get-NetRoute -AddressFamily IPv4 |
                 Where-Object { $_.DestinationPrefix -eq "0.0.0.0/0" } |
                 Select-Object -First 1).NextHop
+
     try {
         $params = @{ InterfaceIndex=$ifIndex; IPAddress=$ipFija; PrefixLength=(Calcular-CIDR $mascara) }
-        if ($gateway) { $params['DefaultGateway'] = $gateway }
+
+        # Solo agregar DefaultGateway si pertenece a la misma red que la IP nueva
+        # Si el gateway es de otra red (ej: 10.0.2.2 vs 192.168.x.x), omitirlo
+        # para evitar el error "not on the same network segment"
+        if ($gateway -and (Red-Base $gateway $mascara) -eq (Red-Base $ipFija $mascara)) {
+            $params['DefaultGateway'] = $gateway
+        }
+
         New-NetIPAddress @params -ErrorAction Stop | Out-Null
         Write-Host "IP estatica configurada correctamente."
         return $true
@@ -165,6 +175,8 @@ function Configurar-IPFija-Interactivo {
     }
     Pausa
 }
+
+# ==================== PERSISTENCIA ====================
 
 function Guardar-Variable-EnArchivo([string]$archivo, [string]$nombre, [string]$valor) {
     $c = Get-Content $archivo -Raw
