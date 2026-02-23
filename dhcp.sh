@@ -1,8 +1,5 @@
 #!/bin/bash
 
-# Capturar la ruta real de este archivo al momento del source.
-# Necesario porque cuando main.sh hace "source dhcp.sh",
-# $0 apunta a main.sh y los sed -i guardarian en el archivo equivocado.
 DHCP_FILE="$(realpath "${BASH_SOURCE[0]}")"
 
 source "$(dirname "$DHCP_FILE")/funciones_comunes.sh"
@@ -232,8 +229,8 @@ dhcp_conf_parametros(){
 	sed -i "s/^LEASE=.*/LEASE=$LEASE_T/"           "$DHCP_FILE"
 	sed -i "s/^MASCARA=.*/MASCARA=$MASCARA_T/"     "$DHCP_FILE"
 
-	# Actualizar variables en memoria del proceso actual
-	# sed -i solo guarda en el archivo, no actualiza las variables en uso
+	# Actualizar variables globales en memoria del proceso actual
+	# (sin local, para que sean visibles desde dhcp_iniciar y el resto del menu)
 	SCOPE="$SCOPE_T"
 	IPINICIAL="$INICIAL_T"
 	IPFINAL="$FINAL_T"
@@ -242,6 +239,8 @@ dhcp_conf_parametros(){
 	DNS2="$DNS2_T"
 	LEASE="$LEASE_T"
 	MASCARA="$MASCARA_T"
+
+	export SCOPE IPINICIAL IPFINAL GATEWAY DNS DNS2 LEASE MASCARA
 
 	echo ""
 	echo "Parametros guardados correctamente."
