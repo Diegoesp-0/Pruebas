@@ -1,8 +1,5 @@
 #!/bin/bash
 
-# Capturar la ruta real de este archivo al momento del source.
-# Necesario porque cuando main.sh hace "source dhcp.sh",
-# $0 apunta a main.sh y los sed -i guardarian en el archivo equivocado.
 DHCP_FILE="$(realpath "${BASH_SOURCE[0]}")"
 
 source "$(dirname "$DHCP_FILE")/funciones_comunes.sh"
