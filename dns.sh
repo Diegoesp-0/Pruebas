@@ -1,12 +1,47 @@
 #!/bin/bash
 
 DNS_FILE="$(realpath "${BASH_SOURCE[0]}")"
-
 source "$(dirname "$DNS_FILE")/funciones_comunes.sh"
 
 # ==================== VARIABLES DNS ====================
 
 DOMINIO="reprobados.com"
+DOMINIOS_GUARDADOS=("reprobados.com")
+
+# ==================== FUNCIONES INTERNAS ====================
+
+_dns_bin(){
+	local nombre=$1
+	local rutas=(
+		"/usr/sbin/$nombre"
+		"/sbin/$nombre"
+		"/usr/bin/$nombre"
+		"/usr/local/sbin/$nombre"
+	)
+	for ruta in "${rutas[@]}"; do
+		if [[ -x "$ruta" ]]; then
+			echo "$ruta"
+			return 0
+		fi
+	done
+	local found
+	found=$(sudo sh -c "which $nombre 2>/dev/null")
+	if [[ -n "$found" ]]; then
+		echo "$found"
+		return 0
+	fi
+	return 1
+}
+
+_dns_servicio(){
+	if systemctl list-unit-files 2>/dev/null | grep -q "^named.service"; then
+		echo "named"
+	elif systemctl list-unit-files 2>/dev/null | grep -q "^bind.service"; then
+		echo "bind"
+	else
+		echo "named"
+	fi
+}
 
 # ==================== FUNCIONES DNS ====================
 
@@ -14,6 +49,28 @@ dns_verificar(){
 	clear
 	instalar_paquete "bind"
 	instalar_paquete "bind-utils"
+
+	echo ""
+	echo "--- Verificando binarios de BIND ---"
+	local checkconf checkzone
+	checkconf=$(_dns_bin "named-checkconf")
+	checkzone=$(_dns_bin "named-checkzone")
+
+	if [[ -n "$checkconf" ]]; then
+		echo "named-checkconf : $checkconf"
+	else
+		echo "named-checkconf : NO ENCONTRADO"
+	fi
+
+	if [[ -n "$checkzone" ]]; then
+		echo "named-checkzone : $checkzone"
+	else
+		echo "named-checkzone : NO ENCONTRADO"
+	fi
+
+	echo ""
+	echo "--- Servicio detectado: $(_dns_servicio) ---"
+	echo ""
 }
 
 dns_ipfija(){
@@ -22,9 +79,7 @@ dns_ipfija(){
 	CONEXION=$(nmcli -t -f NAME,DEVICE connection show --active | grep ":$INTERFAZ$" | cut -d: -f1)
 
 	if [[ -z "$CONEXION" ]]; then
-		echo ""
-		echo "ERROR: No se encontro una conexion activa en $INTERFAZ"
-		echo ""
+		echo ""; echo "ERROR: No se encontro conexion activa en $INTERFAZ"; echo ""
 		return 1
 	fi
 
@@ -32,17 +87,13 @@ dns_ipfija(){
 	METODO=$(nmcli -g ipv4.method connection show "$CONEXION")
 
 	if [[ "$METODO" == "auto" ]]; then
-		echo ""
-		echo "La interfaz $INTERFAZ es dinamica. Configurando IP fija..."
-		echo ""
+		echo ""; echo "La interfaz $INTERFAZ es dinamica. Configurando IP fija..."; echo ""
 
 		local IP_FIJA
 		while true; do
 			read -p "Ingrese la IP fija para $INTERFAZ: " IP_FIJA
-
 			if ! validar_ip "$IP_FIJA"; then
-				echo ""; echo "IP invalida, intente de nuevo..."; echo ""
-				continue
+				echo ""; echo "IP invalida..."; echo ""; continue
 			fi
 			break
 		done
@@ -60,31 +111,27 @@ dns_ipfija(){
 		sudo nmcli connection down "$CONEXION"
 		sudo nmcli connection up "$CONEXION"
 
-		echo ""
-		echo "IP fija $IP_FIJA/24 configurada en $INTERFAZ"
-		echo ""
+		echo ""; echo "IP fija $IP_FIJA/24 configurada en $INTERFAZ"; echo ""
 	else
 		local IP_ACTUAL
 		IP_ACTUAL=$(ip -4 addr show dev "$INTERFAZ" | grep "inet " | awk '{print $2}' | head -n1)
-		echo ""
-		echo "La interfaz $INTERFAZ ya tiene IP fija: $IP_ACTUAL"
-		echo ""
+		echo ""; echo "La interfaz $INTERFAZ ya tiene IP fija: $IP_ACTUAL"; echo ""
 		sleep 2
 	fi
 }
 
 dns_iniciar(){
 	clear
-	iniciar_servicio "named"
+	local SERVICIO
+	SERVICIO=$(_dns_servicio)
+	iniciar_servicio "$SERVICIO"
 }
 
 dns_configurar_zona(){
 	clear
 
 	if ! paquete_instalado "bind"; then
-		echo ""
-		echo "ERROR: BIND no esta instalado. Use la opcion 'verificar' primero."
-		echo ""
+		echo ""; echo "ERROR: BIND no instalado. Use opcion 1 primero."; echo ""
 		return 1
 	fi
 
@@ -92,26 +139,19 @@ dns_configurar_zona(){
 	IP_SERVER=$(obtener_ip_interfaz)
 
 	if [[ -z "$IP_SERVER" ]]; then
-		echo ""
-		echo "ERROR: No se pudo obtener la IP de la interfaz $INTERFAZ"
-		echo "Verifique que la interfaz este activa: ip addr show $INTERFAZ"
-		echo ""
+		echo ""; echo "ERROR: No se pudo obtener IP de $INTERFAZ"; echo ""
 		return 1
 	fi
 
-	echo "IP del servidor: $IP_SERVER (interfaz $INTERFAZ)"
-	echo ""
+	echo "IP del servidor: $IP_SERVER ($INTERFAZ)"; echo ""
 
 	local IP_CLIENTE
 	while true; do
 		echo "=============== IP CLIENTE =============="
 		echo ""
 		read -p "IP a la que apuntara el dominio [$DOMINIO]: " IP_CLIENTE
-
 		if ! validar_ip "$IP_CLIENTE"; then
-			clear
-			echo ""; echo "La IP del cliente no es valida..."; echo ""
-			sleep 2; continue
+			clear; echo ""; echo "IP invalida..."; echo ""; sleep 2; continue
 		fi
 		break
 	done
@@ -119,18 +159,20 @@ dns_configurar_zona(){
 	local SERIAL
 	SERIAL=$(date +%Y%m%d%H)
 
-	if ! grep -q "\"$DOMINIO\"" /etc/named.conf; then
-		sudo bash -c "cat >> /etc/named.conf << 'EOF'
+	# Agregar zona a named.conf si no existe
+	if ! grep -q "\"$DOMINIO\"" /etc/named.conf 2>/dev/null; then
+		sudo bash -c "cat >> /etc/named.conf" << CONFEOF
 
-zone \"$DOMINIO\" {
+zone "$DOMINIO" {
 	type master;
-	file \"/var/lib/named/db.$DOMINIO\";
+	file "/var/lib/named/db.$DOMINIO";
 };
-EOF"
+CONFEOF
 	fi
 
-	sudo bash -c "cat > /var/lib/named/db.$DOMINIO << EOF
-\\\$TTL 604800
+	# Crear archivo de zona
+	sudo bash -c "cat > /var/lib/named/db.$DOMINIO" << ZONAEOF
+\$TTL 604800
 @	IN	SOA	ns1.$DOMINIO. admin.$DOMINIO. (
 		$SERIAL ; Serial
 		604800  ; Refresh
@@ -142,44 +184,46 @@ EOF"
 ns1	IN	A	$IP_SERVER
 @	IN	A	$IP_CLIENTE
 www	IN	CNAME	@
-EOF"
+ZONAEOF
 
-	echo ""
-	echo "Verificando sintaxis..."
+	echo ""; echo "Verificando sintaxis..."
 
-	# En openSUSE los binarios de BIND estan en /usr/sbin/
-	local CHECKCONF="/usr/sbin/named-checkconf"
-	local CHECKZONE="/usr/sbin/named-checkzone"
+	local CHECKCONF CHECKZONE
+	CHECKCONF=$(_dns_bin "named-checkconf")
+	CHECKZONE=$(_dns_bin "named-checkzone")
 
-	if ! sudo "$CHECKCONF"; then
-		echo "ERROR: named.conf tiene errores de sintaxis"
-		return 1
+	if [[ -n "$CHECKCONF" ]]; then
+		if ! sudo "$CHECKCONF"; then
+			echo "ERROR: named.conf tiene errores"; return 1
+		fi
+		echo "named.conf: OK"
+	else
+		echo "ADVERTENCIA: named-checkconf no encontrado, omitiendo verificacion"
 	fi
 
-	if ! sudo "$CHECKZONE" "$DOMINIO" "/var/lib/named/db.$DOMINIO"; then
-		echo "ERROR: El archivo de zona tiene errores"
-		return 1
+	if [[ -n "$CHECKZONE" ]]; then
+		if ! sudo "$CHECKZONE" "$DOMINIO" "/var/lib/named/db.$DOMINIO"; then
+			echo "ERROR: Zona tiene errores"; return 1
+		fi
+		echo "Zona: OK"
+	else
+		echo "ADVERTENCIA: named-checkzone no encontrado, omitiendo verificacion"
 	fi
 
-	# Desactivar firewalld para evitar bloqueos al servicio DNS
 	echo "Desactivando firewall..."
 	sudo systemctl stop firewalld 2>/dev/null
 	sudo systemctl disable firewalld 2>/dev/null
 
-	reiniciar_servicio "named"
+	local SERVICIO
+	SERVICIO=$(_dns_servicio)
+	reiniciar_servicio "$SERVICIO"
 
-	if verificar_servicio_activo "named"; then
-		echo ""
-		echo "Zona [$DOMINIO] configurada correctamente."
-		echo "IP servidor: $IP_SERVER"
-		echo "IP cliente:  $IP_CLIENTE"
-		echo "Serial:      $SERIAL"
-		echo ""
+	if verificar_servicio_activo "$SERVICIO"; then
+		echo ""; echo "Zona [$DOMINIO] configurada correctamente."
+		echo "IP servidor: $IP_SERVER | IP cliente: $IP_CLIENTE | Serial: $SERIAL"; echo ""
 	else
-		echo ""
-		echo "ERROR: El servicio no pudo reiniciarse."
-		echo "Revise: sudo journalctl -u named -n 30"
-		return 1
+		echo ""; echo "ERROR: Servicio no pudo reiniciarse."
+		echo "Revise: sudo journalctl -u $SERVICIO -n 30"; return 1
 	fi
 }
 
@@ -188,44 +232,44 @@ dns_validar(){
 	echo "========== VALIDAR CONFIGURACION DNS =========="
 	echo ""
 
-	local CHECKCONF="/usr/sbin/named-checkconf"
-	local CHECKZONE="/usr/sbin/named-checkzone"
+	local CHECKCONF CHECKZONE
+	CHECKCONF=$(_dns_bin "named-checkconf")
+	CHECKZONE=$(_dns_bin "named-checkzone")
 
 	echo "--- Sintaxis named.conf ---"
-	if sudo "$CHECKCONF" 2>&1; then
-		echo "named.conf: OK"
+	if [[ -n "$CHECKCONF" ]]; then
+		if sudo "$CHECKCONF" 2>&1; then echo "named.conf: OK"
+		else echo "named.conf: ERROR"; fi
 	else
-		echo "named.conf: ERROR"
+		echo "named-checkconf no encontrado"
 	fi
 
 	echo ""
-	echo "--- Sintaxis de zona [$DOMINIO] ---"
-	if [[ -f "/var/lib/named/db.$DOMINIO" ]]; then
-		if sudo "$CHECKZONE" "$DOMINIO" "/var/lib/named/db.$DOMINIO" 2>&1; then
-			echo "Zona: OK"
-		else
-			echo "Zona: ERROR"
-		fi
+	echo "--- Zona [$DOMINIO] ---"
+	if [[ ! -f "/var/lib/named/db.$DOMINIO" ]]; then
+		echo "Archivo no encontrado — configure la zona primero"
+	elif [[ -n "$CHECKZONE" ]]; then
+		if sudo "$CHECKZONE" "$DOMINIO" "/var/lib/named/db.$DOMINIO" 2>&1; then echo "Zona: OK"
+		else echo "Zona: ERROR"; fi
 	else
-		echo "Zona: archivo no encontrado — ejecute 'Configurar zona' primero"
+		echo "named-checkzone no encontrado"
 	fi
 
 	echo ""
 	echo "--- Estado del servicio ---"
-	if verificar_servicio_activo "named"; then
-		echo "named: ACTIVO"
+	local SERVICIO
+	SERVICIO=$(_dns_servicio)
+	if verificar_servicio_activo "$SERVICIO"; then
+		echo "$SERVICIO: ACTIVO"
 	else
-		echo "named: INACTIVO — ejecute 'Iniciar servicio' primero"
-		echo ""
-		return 0
+		echo "$SERVICIO: INACTIVO — use opcion 3 para iniciarlo"
+		echo ""; return 0
 	fi
 
 	echo ""
 	echo "--- Resolucion DNS ---"
 	if command -v dig > /dev/null 2>&1; then
-		echo "Resolviendo $DOMINIO ..."
 		dig @127.0.0.1 "$DOMINIO" A +short +time=3
-		echo "Resolviendo www.$DOMINIO ..."
 		dig @127.0.0.1 "www.$DOMINIO" A +short +time=3
 	else
 		nslookup "$DOMINIO" 127.0.0.1
@@ -233,25 +277,20 @@ dns_validar(){
 
 	echo ""
 	echo "--- Ping (informativo) ---"
-	ping -c 3 "www.$DOMINIO" 2>&1 || echo "Ping fallido (puede ser firewall o que el host no responda ICMP)"
+	ping -c 3 "www.$DOMINIO" 2>&1 || echo "Ping fallido (puede ser firewall o ICMP bloqueado)"
 	echo ""
 }
 
 dns_guardar_dominios(){
-	local -n _ARR=$1
-	local NUEVA_LISTA="	DOMINIOS_GUARDADOS=("
-	for d in "${_ARR[@]}"; do
-		NUEVA_LISTA+="\"$d\" "
+	local nueva_linea="DOMINIOS_GUARDADOS=("
+	for d in "${DOMINIOS_GUARDADOS[@]}"; do
+		nueva_linea+="\"$d\" "
 	done
-	NUEVA_LISTA="${NUEVA_LISTA% })"
-	sed -i "s|^\tDOMINIOS_GUARDADOS=(.*|${NUEVA_LISTA}|" "$DNS_FILE"
+	nueva_linea="${nueva_linea% })"
+	sed -i "s|^DOMINIOS_GUARDADOS=(.*|${nueva_linea}|" "$DNS_FILE"
 }
 
 dns_menu_dominios(){
-	# Variable global para que los dominios persistan entre llamadas al menu
-	# sin necesidad de reiniciar el script
-	DOMINIOS_GUARDADOS=("reprobados.com")
-
 	while true; do
 		clear
 		echo "======= SELECCIONAR DOMINIO ======="
@@ -269,23 +308,25 @@ dns_menu_dominios(){
 
 		if [ "$OPC_DOM" = "0" ]; then
 			break
+
 		elif [ "$OPC_DOM" = "A" ] || [ "$OPC_DOM" = "a" ]; then
 			echo ""
 			read -p "Nuevo dominio (ej: midominio.com): " NUEVO_DOM
 			if [[ -z "$NUEVO_DOM" ]]; then
-				echo "El dominio no puede estar vacio..."; sleep 2; continue
+				echo "No puede estar vacio..."; sleep 2; continue
 			fi
 			local DUPLICADO=0
 			for d in "${DOMINIOS_GUARDADOS[@]}"; do
 				[[ "$d" == "$NUEVO_DOM" ]] && DUPLICADO=1 && break
 			done
 			if [[ $DUPLICADO -eq 1 ]]; then
-				echo "El dominio [$NUEVO_DOM] ya existe..."; sleep 2
+				echo "Ya existe..."; sleep 2
 			else
 				DOMINIOS_GUARDADOS+=("$NUEVO_DOM")
-				dns_guardar_dominios DOMINIOS_GUARDADOS
-				echo "Dominio [$NUEVO_DOM] agregado..."; sleep 2
+				dns_guardar_dominios
+				echo "Dominio [$NUEVO_DOM] guardado."; sleep 2
 			fi
+
 		elif [[ "$OPC_DOM" =~ ^[0-9]+$ ]] && \
 		     [[ "$OPC_DOM" -ge 1 ]] && \
 		     [[ "$OPC_DOM" -le "${#DOMINIOS_GUARDADOS[@]}" ]]; then
@@ -314,7 +355,7 @@ dns_menu(){
 		echo "  3. Iniciar servicio"
 		echo "  4. Configurar zona"
 		echo "  5. Validar configuracion"
-		echo "  6. Seleccionar dominio"
+		echo "  6. Seleccionar / agregar dominio"
 		echo "  0. Volver al menu principal"
 		echo ""
 		read -p "Seleccione una opcion: " OPC
