@@ -147,12 +147,16 @@ EOF"
 	echo ""
 	echo "Verificando sintaxis..."
 
-	if ! sudo named-checkconf; then
+	# En openSUSE los binarios de BIND estan en /usr/sbin/
+	local CHECKCONF="/usr/sbin/named-checkconf"
+	local CHECKZONE="/usr/sbin/named-checkzone"
+
+	if ! sudo "$CHECKCONF"; then
 		echo "ERROR: named.conf tiene errores de sintaxis"
 		return 1
 	fi
 
-	if ! sudo named-checkzone "$DOMINIO" "/var/lib/named/db.$DOMINIO"; then
+	if ! sudo "$CHECKZONE" "$DOMINIO" "/var/lib/named/db.$DOMINIO"; then
 		echo "ERROR: El archivo de zona tiene errores"
 		return 1
 	fi
@@ -184,8 +188,11 @@ dns_validar(){
 	echo "========== VALIDAR CONFIGURACION DNS =========="
 	echo ""
 
+	local CHECKCONF="/usr/sbin/named-checkconf"
+	local CHECKZONE="/usr/sbin/named-checkzone"
+
 	echo "--- Sintaxis named.conf ---"
-	if sudo named-checkconf; then
+	if sudo "$CHECKCONF" 2>&1; then
 		echo "named.conf: OK"
 	else
 		echo "named.conf: ERROR"
@@ -193,24 +200,40 @@ dns_validar(){
 
 	echo ""
 	echo "--- Sintaxis de zona [$DOMINIO] ---"
-	if sudo named-checkzone "$DOMINIO" "/var/lib/named/db.$DOMINIO"; then
-		echo "Zona: OK"
+	if [[ -f "/var/lib/named/db.$DOMINIO" ]]; then
+		if sudo "$CHECKZONE" "$DOMINIO" "/var/lib/named/db.$DOMINIO" 2>&1; then
+			echo "Zona: OK"
+		else
+			echo "Zona: ERROR"
+		fi
 	else
-		echo "Zona: ERROR"
+		echo "Zona: archivo no encontrado — ejecute 'Configurar zona' primero"
+	fi
+
+	echo ""
+	echo "--- Estado del servicio ---"
+	if verificar_servicio_activo "named"; then
+		echo "named: ACTIVO"
+	else
+		echo "named: INACTIVO — ejecute 'Iniciar servicio' primero"
+		echo ""
+		return 0
 	fi
 
 	echo ""
 	echo "--- Resolucion DNS ---"
 	if command -v dig > /dev/null 2>&1; then
-		dig @127.0.0.1 "$DOMINIO" A +short
-		dig @127.0.0.1 "www.$DOMINIO" A +short
+		echo "Resolviendo $DOMINIO ..."
+		dig @127.0.0.1 "$DOMINIO" A +short +time=3
+		echo "Resolviendo www.$DOMINIO ..."
+		dig @127.0.0.1 "www.$DOMINIO" A +short +time=3
 	else
 		nslookup "$DOMINIO" 127.0.0.1
 	fi
 
 	echo ""
 	echo "--- Ping (informativo) ---"
-	ping -c 3 "www.$DOMINIO" 2>&1 || echo "Ping fallido (puede ser firewall, no necesariamente error DNS)"
+	ping -c 3 "www.$DOMINIO" 2>&1 || echo "Ping fallido (puede ser firewall o que el host no responda ICMP)"
 	echo ""
 }
 
