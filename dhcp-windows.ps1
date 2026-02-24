@@ -184,64 +184,87 @@ function DHCP-Iniciar {
     Mostrar-Cabecera "INICIAR SERVIDOR DHCP"
 
     if (-not (Rol-Instalado "DHCP")) {
-        Write-Host "`nERROR: Instale el rol DHCP primero (opcion 1).`n"; Pausa; return
-    }
-    if ($script:DHCP_SCOPE     -eq "X" -or
-        $script:DHCP_IPINICIAL -eq "X" -or
-        $script:DHCP_MASCARA   -eq "X") {
-        Write-Host "`nERROR: Configure los parametros primero (opcion 3).`n"; Pausa; return
+        Write-Host "`nERROR: Instale el rol DHCP primero (opcion 1).`n"
+        Pausa
+        return
     }
 
-    # Asignar IP estatica en la tarjeta fija
-    $ok = Asignar-IPEstatica -ipFija  $script:DHCP_IPINICIAL `
-                             -prefijo (Calcular-CIDR $script:DHCP_MASCARA) `
-                             -gateway $script:DHCP_GATEWAY
+    if ($script:DHCP_SCOPE -eq "X" -or
+        $script:DHCP_IPINICIAL -eq "X") {
+        Write-Host "`nERROR: Configure los parametros primero (opcion 3).`n"
+        Pausa
+        return
+    }
+
+    if ($script:DHCP_MASCARA -eq "X") {
+        $script:DHCP_MASCARA = "255.255.255.0"
+    }
+
+    # Asignar IP estatica
+    $ok = Asignar-IPEstatica `
+            -ipFija  $script:DHCP_IPINICIAL `
+            -prefijo (Calcular-CIDR $script:DHCP_MASCARA) `
+            -gateway $script:DHCP_GATEWAY
+
     if (-not $ok) { Pausa; return }
 
-    $red = Red-Base $script:DHCP_IPINICIAL $script:DHCP_MASCARA
     try {
- 
-        $prev = Get-DhcpServerv4Scope -ErrorAction SilentlyContinue |
-                Where-Object { $_.ScopeId.IPAddressToString -eq $red }
-        if ($prev) {
-            Remove-DhcpServerv4Scope -ScopeId $prev.ScopeId -Force
-            Write-Host "Ambito anterior eliminado."
-        }
 
+        try {
+            Add-DhcpServerInDC -DnsName $env:COMPUTERNAME `
+                               -IPAddress $script:DHCP_IPINICIAL `
+                               -ErrorAction SilentlyContinue
+        } catch {}
+
+        Restart-Service DHCPServer -ErrorAction SilentlyContinue
+
+        Get-DhcpServerv4Scope -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                Remove-DhcpServerv4Scope -ScopeId $_.ScopeId -Force -ErrorAction SilentlyContinue
+            }
+
+        # Crear scope en estado INACTIVO
         Add-DhcpServerv4Scope `
-            -Name          $script:DHCP_SCOPE                          `
-            -StartRange    (Siguiente-IP $script:DHCP_IPINICIAL)       `
-            -EndRange      $script:DHCP_IPFINAL                        `
-            -SubnetMask    $script:DHCP_MASCARA                        `
+            -Name $script:DHCP_SCOPE `
+            -StartRange (Siguiente-IP $script:DHCP_IPINICIAL) `
+            -EndRange $script:DHCP_IPFINAL `
+            -SubnetMask $script:DHCP_MASCARA `
             -LeaseDuration ([TimeSpan]::FromSeconds([int]$script:DHCP_LEASE)) `
-            -State         Active
+            -State Inactive
 
-        # Obtener el ScopeId real asignado por Windows
         $scopeReal = (Get-DhcpServerv4Scope |
-                      Where-Object { $_.Name -eq $script:DHCP_SCOPE }).ScopeId.IPAddressToString
+                      Where-Object { $_.Name -eq $script:DHCP_SCOPE }).ScopeId
 
         if ($script:DHCP_GATEWAY -ne "X") {
-            Set-DhcpServerv4OptionValue -ScopeId $scopeReal -Router $script:DHCP_GATEWAY
+            Set-DhcpServerv4OptionValue -ScopeId $scopeReal `
+                                        -Router $script:DHCP_GATEWAY `
+                                        -ErrorAction SilentlyContinue
         }
 
         $listaDNS = @()
-        if ($script:DHCP_DNS  -ne "X") { $listaDNS += $script:DHCP_DNS  }
+        if ($script:DHCP_DNS  -ne "X") { $listaDNS += $script:DHCP_DNS }
         if ($script:DHCP_DNS2 -ne "X") { $listaDNS += $script:DHCP_DNS2 }
+
         if ($listaDNS.Count -gt 0) {
-            Set-DhcpServerv4OptionValue -ScopeId $scopeReal -DnsServer $listaDNS
+            Set-DhcpServerv4OptionValue -ScopeId $scopeReal `
+                                        -DnsServer $listaDNS `
+                                        -ErrorAction SilentlyContinue
         }
 
-        Iniciar-Servicio "DHCPServer"
+        Set-DhcpServerv4Scope -ScopeId $scopeReal -State Active
+
+        Restart-Service DHCPServer
 
         Write-Host ""
         Write-Host "Servidor DHCP configurado correctamente."
-        Write-Host " Red base      : $scopeReal"
-        Write-Host " Rango activo  : $(Siguiente-IP $script:DHCP_IPINICIAL) - $script:DHCP_IPFINAL"
-        Write-Host " Mascara       : $script:DHCP_MASCARA"
-        Write-Host " Interfaz      : $NOMBRE_IFACE"
-    } catch {
-        Write-Host "ERROR al crear el ambito DHCP: $_"
+        Write-Host " Rango activo : $(Siguiente-IP $script:DHCP_IPINICIAL) - $script:DHCP_IPFINAL"
+        Write-Host " Mascara      : $script:DHCP_MASCARA"
     }
+    catch {
+        Write-Host "ERROR real detectado:"
+        Write-Host $_.Exception.Message
+    }
+
     Pausa
 }
 
