@@ -27,6 +27,7 @@ iniciar(){
 		return 1
 	fi
 
+	sudo ip link set enp0s9 promisc on
 	sudo systemctl enable sshd
 	sudo systemctl start sshd
 	sleep 1
@@ -39,20 +40,20 @@ iniciar(){
 		echo "Puerto 22 abierto en el firewall"
 		echo ""
 		IP=$(ip a show enp0s9 | grep "inet " | awk '{print $2}' | cut -d'/' -f1)
-		echo "Conéctate desde PuTTY:"
+		echo "Conectate desde PuTTY:"
 		echo "  Host: $IP"
 		echo "  Port: 22"
 		echo ""
 	else
 		echo ""
 		echo "ERROR: No se pudo iniciar SSH"
-		echo "Revise el log con: sudo journalctl -u sshd -n 30"
 		echo ""
 	fi
 }
 
 reiniciar(){
 	clear
+	sudo ip link set enp0s9 promisc on
 	sudo systemctl restart sshd
 	sleep 1
 
