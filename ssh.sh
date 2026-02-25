@@ -21,7 +21,7 @@ verificar(){
 
 iniciar(){
 	clear
-	default via 10.0.2.2 dev enp0s3
+	sudo ip route del default via 10.0.2.2 dev enp0s3
 	if ! rpm -q openssh-server > /dev/null 2>&1; then
 		echo ""
 		echo "ERROR: OpenSSH-Server no esta instalado"
