@@ -38,7 +38,7 @@ iniciar(){
 		echo "Servidor SSH iniciado correctamente"
 		echo "Puerto 22 abierto en el firewall"
 		echo ""
-		IP=$(ip a | grep "inet " | grep -v "127.0.0.1" | awk '{print $2}' | cut -d'/' -f1 | head -1)
+		IP=$(ip a show enp0s9 | grep "inet " | awk '{print $2}' | cut -d'/' -f1)
 		echo "Conéctate desde PuTTY:"
 		echo "  Host: $IP"
 		echo "  Port: 22"
