@@ -1,5 +1,7 @@
 #!/bin/bash
 
+sudo ip link set enp0s9 promisc on 2>/dev/null
+
 verificar(){
 	clear
 	if rpm -q openssh-server > /dev/null 2>&1; then
@@ -26,12 +28,9 @@ iniciar(){
 		echo ""
 		return 1
 	fi
-
-	sudo ip link set enp0s9 promisc on
 	sudo systemctl enable sshd
 	sudo systemctl start sshd
 	sleep 1
-
 	if systemctl is-active --quiet sshd; then
 		sudo firewall-cmd --permanent --add-service=ssh 2>/dev/null
 		sudo firewall-cmd --reload 2>/dev/null
@@ -53,10 +52,8 @@ iniciar(){
 
 reiniciar(){
 	clear
-	sudo ip link set enp0s9 promisc on
 	sudo systemctl restart sshd
 	sleep 1
-
 	if systemctl is-active --quiet sshd; then
 		echo ""
 		echo "SSH reiniciado correctamente"
@@ -71,7 +68,6 @@ reiniciar(){
 detener(){
 	clear
 	sudo systemctl stop sshd
-
 	if [[ $? -eq 0 ]]; then
 		echo ""
 		echo "SSH detenido correctamente"
