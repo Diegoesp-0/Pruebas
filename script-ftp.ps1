@@ -122,17 +122,22 @@ if ($u) {
     Print-Titulo "CREACION USUARIOS FTP"
 
     # Cantidad usuarios
-    do {
+    # Cantidad usuarios
+$cantidad = 0
 
-        $cantidadStr = Read-Host "Cuantos usuarios desea crear"
-        $cantidadStr = $cantidadStr.Trim()
+do {
 
-        $ok = [int]::TryParse($cantidadStr,[ref]$cantidad)
+    $cantidadStr = Read-Host "Cuantos usuarios desea crear"
+    $cantidadStr = $cantidadStr.Trim()
 
-        if (-not $ok -or $cantidad -lt 1) {
-            Print-Error "Numero invalido"
-            $cantidad = 0
-        }
+    $ok = [int]::TryParse($cantidadStr, [ref]$cantidad)
+
+    if (-not $ok -or $cantidad -lt 1) {
+        Print-Error "Numero invalido"
+        $cantidad = 0
+    }
+
+} while ($cantidad -lt 1)
 
     } while ($cantidad -lt 1)
 
