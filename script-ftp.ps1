@@ -1,7 +1,7 @@
 # ============================================================
 # script-ftp.ps1 - Instalacion y gestion de servidor FTP
 # Windows Server Core - IIS + FTP Service
-# Puerto: 21
+# Puerto: 22
 # Uso:
 #   .\script-ftp.ps1 -i   => Instalar y configurar FTP
 #   .\script-ftp.ps1 -u   => Crear usuarios
@@ -22,7 +22,7 @@ $SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
 # ---------- Variables globales ----------
 $SITE_NAME = "FTP-Servidor"
 $FTP_ROOT  = "C:\FTP"
-$PORT      = 21
+$PORT      = 22
 
 # ============================================================
 # INSTALACION Y CONFIGURACION IIS + FTP
@@ -39,7 +39,7 @@ if ($i) {
         exit 1
     }
 
-    # ---------- Instalar caracteristicas ----------
+    # ---------- Instalar características ----------
     Print-Info "Instalando caracteristicas de Windows (IIS + FTP)..."
 
     $features = @(
@@ -66,12 +66,12 @@ if ($i) {
     Print-Info "Cargando modulo WebAdministration..."
     Import-Module WebAdministration -Force -ErrorAction Stop
 
-    # ---------- Deshabilitar Firewall ----------
-    Print-Info "Deshabilitando Firewall de Windows..."
+    # ---------- Deshabilitar Firewall (para garantizar conectividad) ----------
+    Print-Info "Deshabilitando Firewall de Windows para garantizar conectividad..."
     Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
     Print-Completado "Firewall deshabilitado."
 
-    # Reglas por si se reactiva el firewall
+    # Tambien crear regla por si acaso se reactiva el firewall
     if (-not (Get-NetFirewallRule -Name "FTP-$PORT" -ErrorAction SilentlyContinue)) {
         New-NetFirewallRule -Name "FTP-$PORT" `
             -DisplayName "FTP Puerto $PORT" `
@@ -80,6 +80,7 @@ if ($i) {
         Print-Completado "Regla de firewall creada para puerto $PORT."
     }
 
+    # Regla para modo pasivo (rango de puertos tipico)
     if (-not (Get-NetFirewallRule -Name "FTP-Pasivo" -ErrorAction SilentlyContinue)) {
         New-NetFirewallRule -Name "FTP-Pasivo" `
             -DisplayName "FTP Modo Pasivo 49152-65535" `
@@ -95,9 +96,7 @@ if ($i) {
         $FTP_ROOT,
         "$FTP_ROOT\general",
         "$FTP_ROOT\reprobados",
-        "$FTP_ROOT\recursadores",
-        "$FTP_ROOT\LocalUser",
-        "$FTP_ROOT\LocalUser\Public"
+        "$FTP_ROOT\recursadores"
     )
 
     foreach ($d in $dirs) {
@@ -109,24 +108,19 @@ if ($i) {
         }
     }
 
-    # Junction en Public para que el anonimo vea solo /general (solo lectura)
-    $jPublicGeneral = "$FTP_ROOT\LocalUser\Public\general"
-    if (-not (Test-Path $jPublicGeneral)) {
-        cmd /c "mklink /J `"$jPublicGeneral`" `"$FTP_ROOT\general`"" | Out-Null
-        Print-Completado "Enlace anonimo creado: $jPublicGeneral -> $FTP_ROOT\general"
-    }
-
     # ---------- Permisos NTFS base ----------
     Print-Info "Configurando permisos NTFS base..."
-    # IUSR accede a la raiz y a LocalUser\Public (solo lectura)
+
+    # IUSR = usuario anonimo de IIS
     icacls $FTP_ROOT /grant "IUSR:(OI)(CI)RX" /T | Out-Null
+    icacls "$FTP_ROOT\general" /grant "IUSR:(OI)(CI)RX" | Out-Null
     Print-Completado "Permisos de usuario anonimo configurados."
 
-    # ---------- Detener sitio Default ----------
+    # ---------- Detener sitio Default si existe para liberar puerto ----------
     $defaultSite = Get-WebSite -Name "Default Web Site" -ErrorAction SilentlyContinue
     if ($defaultSite) {
         Stop-WebSite -Name "Default Web Site" -ErrorAction SilentlyContinue
-        Print-Info "Sitio 'Default Web Site' detenido."
+        Print-Info "Sitio 'Default Web Site' detenido para liberar recursos."
     }
 
     # ---------- Crear o actualizar sitio FTP ----------
@@ -141,43 +135,35 @@ if ($i) {
             -Force | Out-Null
         Print-Completado "Sitio FTP creado."
     } else {
-        Print-Info "Sitio FTP ya existe, actualizando configuracion..."
+        Print-Info "Sitio FTP ya existe, actualizando puerto a $PORT..."
         Set-ItemProperty "IIS:\Sites\$SITE_NAME" `
             -Name bindings `
             -Value @{protocol="ftp"; bindingInformation="*:${PORT}:"}
         Print-Completado "Puerto actualizado a $PORT."
     }
 
-    # ---------- Aislamiento de usuarios (modo 3 = carpeta local por usuario) ----------
-    # IIS busca la raiz de cada usuario en: $FTP_ROOT\LocalUser\<usuario>
-    # El anonimo usa: $FTP_ROOT\LocalUser\Public
+    # ---------- Aislamiento de usuarios ----------
+    # Modo 0 = sin aislamiento (todos ven la raiz, pero permisos NTFS controlan acceso)
     Set-ItemProperty "IIS:\Sites\$SITE_NAME" `
         -Name ftpServer.userIsolation.mode `
-        -Value 3
-    Print-Completado "Aislamiento de usuarios activado."
-
-    # ---------- SSL deshabilitado (FTP plano sin cifrado) ----------
-    Print-Info "Deshabilitando SSL..."
-    Set-ItemProperty "IIS:\Sites\$SITE_NAME" `
-        -Name ftpServer.security.ssl.controlChannelPolicy `
         -Value 0
-    Set-ItemProperty "IIS:\Sites\$SITE_NAME" `
-        -Name ftpServer.security.ssl.dataChannelPolicy `
-        -Value 0
-    Print-Completado "SSL deshabilitado, FTP plano habilitado."
+    Print-Info "Modo de aislamiento configurado (sin aislamiento, control por NTFS)."
 
     # ---------- Autenticacion ----------
     Set-ItemProperty "IIS:\Sites\$SITE_NAME" `
         -Name ftpServer.security.authentication.anonymousAuthentication.enabled `
         -Value $true
+
     Set-ItemProperty "IIS:\Sites\$SITE_NAME" `
         -Name ftpServer.security.authentication.basicAuthentication.enabled `
         -Value $true
+
     Print-Completado "Autenticacion anonima y basica habilitadas."
 
     # ---------- Reglas de autorizacion FTP ----------
     Print-Info "Configurando reglas de autorizacion FTP..."
 
+    # Limpiar reglas anteriores
     Clear-WebConfiguration -PSPath "IIS:\" `
         -Filter "system.ftpServer/security/authorization" `
         -Location $SITE_NAME -ErrorAction SilentlyContinue
@@ -204,21 +190,18 @@ if ($i) {
 
     Print-Completado "Reglas de autorizacion configuradas."
 
-    # ---------- Arrancar servicio FTP ----------
+    # ---------- Habilitar y arrancar servicio FTP ----------
     Print-Info "Arrancando servicio FTPSVC..."
     Set-Service -Name FTPSVC -StartupType Automatic
     Restart-Service FTPSVC -Force
     Start-WebSite -Name $SITE_NAME -ErrorAction SilentlyContinue
 
-    Print-Completado "Servidor FTP listo en puerto $PORT"
-    Print-Info ""
-    Print-Info "Al conectarse por FTP cada usuario vera:"
-    Print-Info "  /general          => lectura y escritura"
-    Print-Info "  /<grupo>          => lectura y escritura (solo su grupo)"
-    Print-Info "  /<usuario>        => lectura y escritura (carpeta personal)"
-    Print-Info ""
-    Print-Info "El anonimo vera unicamente:"
-    Print-Info "  /general          => solo lectura"
+    Print-Completado "Servidor FTP listo y escuchando en el puerto $PORT"
+    Print-Info "Estructura de directorios:"
+    Print-Info "  $FTP_ROOT\general        (todos: lectura; autenticados: escritura)"
+    Print-Info "  $FTP_ROOT\reprobados     (solo miembros del grupo)"
+    Print-Info "  $FTP_ROOT\recursadores   (solo miembros del grupo)"
+    Print-Info "  $FTP_ROOT\<usuario>      (carpeta personal de cada usuario)"
 }
 
 # ============================================================
@@ -230,6 +213,7 @@ if ($u) {
 
     Print-Titulo "CREACION DE USUARIOS FTP"
 
+    # Verificar que el servidor este instalado
     if (-not (Test-Path $FTP_ROOT)) {
         Print-Error "El directorio $FTP_ROOT no existe. Ejecuta primero: .\script-ftp.ps1 -i"
         exit 1
@@ -258,6 +242,7 @@ if ($u) {
             }
         } while ($usuario -eq "")
 
+        # Verificar si ya existe
         if (Get-LocalUser -Name $usuario -ErrorAction SilentlyContinue) {
             Print-Error "El usuario '$usuario' ya existe. Saltando..."
             continue
@@ -291,55 +276,32 @@ if ($u) {
             -PasswordNeverExpires `
             -UserMayNotChangePassword `
             -Description "Usuario FTP - Grupo: $grupo" | Out-Null
+
         Print-Completado "Usuario '$usuario' creado."
 
-        # --- Crear carpeta personal real ---
-        $userPersonal = "$FTP_ROOT\$usuario"
-        if (-not (Test-Path $userPersonal)) {
-            New-Item -Path $userPersonal -ItemType Directory | Out-Null
+        # --- Crear carpeta personal ---
+        $userDir = "$FTP_ROOT\$usuario"
+        if (-not (Test-Path $userDir)) {
+            New-Item -Path $userDir -ItemType Directory | Out-Null
+            Print-Completado "Carpeta personal creada: $userDir"
         }
 
-        # --- Crear raiz de aislamiento ---
-        # IIS (modo 3) busca: C:\FTP\LocalUser\<usuario>
-        # Dentro se ponen junctions para que el usuario vea general, grupo y personal
-        $userRoot = "$FTP_ROOT\LocalUser\$usuario"
-        if (-not (Test-Path $userRoot)) {
-            New-Item -Path $userRoot -ItemType Directory | Out-Null
-            Print-Completado "Raiz de aislamiento creada: $userRoot"
-        }
-
-        # Junction a general
-        $jGeneral = "$userRoot\general"
-        if (-not (Test-Path $jGeneral)) {
-            cmd /c "mklink /J `"$jGeneral`" `"$FTP_ROOT\general`"" | Out-Null
-            Print-Completado "Enlace: $jGeneral -> $FTP_ROOT\general"
-        }
-
-        # Junction al grupo
-        $jGrupo = "$userRoot\$grupo"
-        if (-not (Test-Path $jGrupo)) {
-            cmd /c "mklink /J `"$jGrupo`" `"$FTP_ROOT\$grupo`"" | Out-Null
-            Print-Completado "Enlace: $jGrupo -> $FTP_ROOT\$grupo"
-        }
-
-        # Junction a carpeta personal
-        $jPersonal = "$userRoot\$usuario"
-        if (-not (Test-Path $jPersonal)) {
-            cmd /c "mklink /J `"$jPersonal`" `"$userPersonal`"" | Out-Null
-            Print-Completado "Enlace: $jPersonal -> $userPersonal"
-        }
-
-        # --- Permisos NTFS ---
+        # --- Asignar permisos NTFS ---
         Print-Info "Asignando permisos NTFS..."
-        icacls $userPersonal /grant "${usuario}:(OI)(CI)F"  | Out-Null
-        icacls "$FTP_ROOT\general" /grant "${usuario}:(OI)(CI)M" | Out-Null
-        icacls "$FTP_ROOT\$grupo"  /grant "${usuario}:(OI)(CI)M" | Out-Null
-        icacls $userRoot /grant "${usuario}:(OI)(CI)RX" | Out-Null
 
-        Print-Completado "Usuario '$usuario' listo. Al conectarse vera:"
-        Print-Info "  /general    => lectura y escritura"
-        Print-Info "  /$grupo     => lectura y escritura"
-        Print-Info "  /$usuario   => lectura y escritura (carpeta personal)"
+        # Carpeta personal: control total
+        icacls $userDir /grant "${usuario}:(OI)(CI)F" | Out-Null
+
+        # Carpeta general: modificar (lectura + escritura)
+        icacls "$FTP_ROOT\general" /grant "${usuario}:(OI)(CI)M" | Out-Null
+
+        # Carpeta de su grupo: modificar
+        icacls "$FTP_ROOT\$grupo" /grant "${usuario}:(OI)(CI)M" | Out-Null
+
+        Print-Completado "Permisos asignados para '$usuario':"
+        Print-Info "  $userDir           => Control total"
+        Print-Info "  $FTP_ROOT\general  => Modificar (lectura + escritura)"
+        Print-Info "  $FTP_ROOT\$grupo   => Modificar (lectura + escritura)"
     }
 
     Print-Titulo "CREACION DE USUARIOS COMPLETADA"
@@ -373,15 +335,15 @@ if ($c) {
         }
     } while ($nuevoGrupo -eq "")
 
-    $userRoot = "$FTP_ROOT\LocalUser\$usuario"
-
-    # Detectar grupo actual buscando el junction existente
+    # Detectar grupo actual revisando permisos
     $grupoActual = ""
-    foreach ($g in @("reprobados", "recursadores")) {
-        if (Test-Path "$userRoot\$g") {
-            $grupoActual = $g
-            break
-        }
+    $aclReprobados   = (icacls "$FTP_ROOT\reprobados" 2>&1) -join " "
+    $aclRecursadores = (icacls "$FTP_ROOT\recursadores" 2>&1) -join " "
+
+    if ($aclReprobados -match $usuario) {
+        $grupoActual = "reprobados"
+    } elseif ($aclRecursadores -match $usuario) {
+        $grupoActual = "recursadores"
     }
 
     if ($grupoActual -eq $nuevoGrupo) {
@@ -389,19 +351,15 @@ if ($c) {
         exit 0
     }
 
-    # Quitar junction del grupo anterior
+    # Quitar acceso al grupo anterior
     if ($grupoActual -ne "") {
         Print-Info "Quitando acceso a '$grupoActual'..."
-        cmd /c "rmdir `"$userRoot\$grupoActual`"" | Out-Null
         icacls "$FTP_ROOT\$grupoActual" /remove $usuario 2>&1 | Out-Null
         Print-Completado "Acceso removido de '$grupoActual'."
     }
 
-    # Crear junction del nuevo grupo
+    # Dar acceso al nuevo grupo
     Print-Info "Asignando acceso a '$nuevoGrupo'..."
-    if (-not (Test-Path "$userRoot\$nuevoGrupo")) {
-        cmd /c "mklink /J `"$userRoot\$nuevoGrupo`" `"$FTP_ROOT\$nuevoGrupo`"" | Out-Null
-    }
     icacls "$FTP_ROOT\$nuevoGrupo" /grant "${usuario}:(OI)(CI)M" | Out-Null
 
     Print-Completado "Grupo actualizado correctamente."
