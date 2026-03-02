@@ -128,15 +128,24 @@ if ($u) {
 
     Print-Titulo "CREACION USUARIOS FTP"
 
-    $cantidadStr = ""
-
+    # ---------- Cantidad usuarios ----------
     do {
         $cantidadStr = Read-Host "Cuantos usuarios desea crear"
 
-    } while ($cantidadStr -notmatch '^\d+$' -or [int]$cantidadStr -lt 1)
+        try {
+            $cantidad = [int]$cantidadStr
+        }
+        catch {
+            $cantidad = 0
+        }
 
-    $cantidad = [int]$cantidadStr
+        if ($cantidad -lt 1) {
+            Print-Error "Ingrese un numero valido mayor a 0"
+        }
 
+    } while ($cantidad -lt 1)
+
+    # ---------- Crear usuarios ----------
     for ($i = 1; $i -le $cantidad; $i++) {
 
         Print-Titulo "Usuario $i de $cantidad"
@@ -167,7 +176,7 @@ if ($u) {
             -PasswordNeverExpires `
             -UserMayNotChangePassword | Out-Null
 
-        # Estructura usuario
+        # ---------- Estructura FTP ----------
         $userRoot = "$FTP_ROOT\$usuario"
 
         $paths = @(
@@ -181,19 +190,21 @@ if ($u) {
             New-Item -Path $p -ItemType Directory -Force | Out-Null
         }
 
-        # Permisos
-        icacls $userRoot /inheritance:r | Out-Null
-        icacls $userRoot /grant "${usuario}:(OI)(CI)F" | Out-Null
+        # ---------- Permisos ----------
+        icacls $userRoot /grant "SYSTEM:(OI)(CI)F" /T | Out-Null
+        icacls $userRoot /grant "Administrators:(OI)(CI)F" /T | Out-Null
+        icacls $userRoot /grant "${usuario}:(OI)(CI)F" /T | Out-Null
 
-        icacls "$userRoot\general" /grant "IUSR:(OI)(CI)RX" | Out-Null
-        icacls "$userRoot\general" /grant "${usuario}:(OI)(CI)M" | Out-Null
+        # Anónimo solo lectura
+        icacls "$userRoot\general" /grant "IUSR:(OI)(CI)RX" /T | Out-Null
+        icacls "$userRoot\general" /grant "${usuario}:(OI)(CI)M" /T | Out-Null
 
-        icacls "$userRoot\$grupo" /grant "${usuario}:(OI)(CI)M" | Out-Null
+        # Grupo
+        icacls "$userRoot\$grupo" /grant "${usuario}:(OI)(CI)M" /T | Out-Null
 
-        Print-Completado "Usuario creado"
+        Print-Completado "Usuario creado correctamente"
     }
 }
-
 # ============================================================
 # CAMBIAR GRUPO
 # ============================================================
