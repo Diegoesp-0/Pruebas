@@ -57,19 +57,15 @@ if ($i) {
     # Firewall
     Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
 
-    if (-not (Get-NetFirewallRule -Name "FTP-$PORT" -ErrorAction SilentlyContinue)) {
-        New-NetFirewallRule -Name "FTP-$PORT" `
-            -DisplayName "FTP Puerto $PORT" `
-            -Protocol TCP -LocalPort $PORT `
-            -Direction Inbound -Action Allow | Out-Null
-    }
+    New-NetFirewallRule -Name "FTP-$PORT" `
+        -DisplayName "FTP Puerto $PORT" `
+        -Protocol TCP -LocalPort $PORT `
+        -Direction Inbound -Action Allow -ErrorAction SilentlyContinue | Out-Null
 
-    if (-not (Get-NetFirewallRule -Name "FTP-PASIVO" -ErrorAction SilentlyContinue)) {
-        New-NetFirewallRule -Name "FTP-PASIVO" `
-            -DisplayName "FTP Pasivo" `
-            -Protocol TCP -LocalPort 49152-65535 `
-            -Direction Inbound -Action Allow | Out-Null
-    }
+    New-NetFirewallRule -Name "FTP-PASIVO" `
+        -DisplayName "FTP Pasivo" `
+        -Protocol TCP -LocalPort 49152-65535 `
+        -Direction Inbound -Action Allow -ErrorAction SilentlyContinue | Out-Null
 
     # Directorios base
     $dirs = @(
@@ -80,18 +76,15 @@ if ($i) {
     )
 
     foreach ($d in $dirs) {
-        if (-not (Test-Path $d)) {
-            New-Item -Path $d -ItemType Directory -Force | Out-Null
-        }
+        New-Item -Path $d -ItemType Directory -Force | Out-Null
     }
 
     # Permisos anonimo
     icacls "$FTP_ROOT\general" /grant "IUSR:(OI)(CI)RX" /T | Out-Null
 
     # Sitio FTP
-    $site = Get-WebSite -Name $SITE_NAME -ErrorAction SilentlyContinue
+    if (-not (Get-WebSite -Name $SITE_NAME -ErrorAction SilentlyContinue)) {
 
-    if (-not $site) {
         New-WebFtpSite `
             -Name $SITE_NAME `
             -Port $PORT `
@@ -99,7 +92,7 @@ if ($i) {
             -Force | Out-Null
     }
 
-    # 🔥 AISLAMIENTO CORRECTO
+    # AISLAMIENTO USUARIO POR CARPETA
     Set-ItemProperty "IIS:\Sites\$SITE_NAME" `
         -Name ftpServer.userIsolation.mode `
         -Value 3
@@ -128,53 +121,41 @@ if ($u) {
 
     Print-Titulo "CREACION USUARIOS FTP"
 
-    # ====================================================
-    # Cantidad de usuarios (validación robusta)
-    # ====================================================
+    # Cantidad usuarios
     do {
 
         $cantidadStr = Read-Host "Cuantos usuarios desea crear"
         $cantidadStr = $cantidadStr.Trim()
 
-        $esNumero = [int]::TryParse($cantidadStr, [ref]$cantidad)
+        $ok = [int]::TryParse($cantidadStr,[ref]$cantidad)
 
-        if (-not $esNumero -or $cantidad -lt 1) {
-            Print-Error "Ingrese un numero valido mayor a 0"
+        if (-not $ok -or $cantidad -lt 1) {
+            Print-Error "Numero invalido"
             $cantidad = 0
         }
 
     } while ($cantidad -lt 1)
 
-    # ====================================================
-    # Creación masiva de usuarios
-    # ====================================================
+    # Creación masiva
     for ($i = 1; $i -le $cantidad; $i++) {
 
         Print-Titulo "Usuario $i de $cantidad"
 
-        # ---------- Usuario ----------
-        do {
-            $usuario = Read-Host "Usuario"
-        } while (-not (Validar-Usuario $usuario))
+        do { $usuario = Read-Host "Usuario" }
+        while (-not (Validar-Usuario $usuario))
 
         if (Get-LocalUser -Name $usuario -ErrorAction SilentlyContinue) {
-            Print-Error "El usuario ya existe"
+            Print-Error "Usuario existe"
             continue
         }
 
-        # ---------- Password ----------
-        do {
-            $password = Read-Host "Password"
-        } while ($password.Length -lt 4)
+        do { $password = Read-Host "Password" }
+        while ($password.Length -lt 4)
 
-        # ---------- Grupo ----------
-        do {
-            $grupo = Read-Host "Grupo (reprobados/recursadores)"
-        } while (-not (Validar-Grupo $grupo))
+        do { $grupo = Read-Host "Grupo (reprobados/recursadores)" }
+        while (-not (Validar-Grupo $grupo))
 
-        # ====================================================
         # Crear usuario Windows
-        # ====================================================
         $passSecure = ConvertTo-SecureString $password -AsPlainText -Force
 
         New-LocalUser `
@@ -183,13 +164,11 @@ if ($u) {
             -PasswordNeverExpires `
             -UserMayNotChangePassword | Out-Null
 
-        # ====================================================
         # Estructura FTP
-        # ====================================================
         $userRoot = "$FTP_ROOT\$usuario"
 
         $paths = @(
-            "$userRoot",
+            $userRoot,
             "$userRoot\general",
             "$userRoot\$grupo",
             "$userRoot\$usuario"
@@ -199,32 +178,24 @@ if ($u) {
             New-Item -Path $p -ItemType Directory -Force | Out-Null
         }
 
-        # ====================================================
-        # Permisos NTFS (ACL Seguros)
-        # ====================================================
-
-        # Limpiar herencia
+        # Permisos NTFS
         icacls $userRoot /inheritance:r /T | Out-Null
 
-        # Permisos base del sistema
         icacls $userRoot /grant "SYSTEM:(OI)(CI)F" /T | Out-Null
         icacls $userRoot /grant "Administrators:(OI)(CI)F" /T | Out-Null
-
-        # Usuario propietario
         icacls $userRoot /grant "${usuario}:(OI)(CI)F" /T | Out-Null
 
-        # Carpeta pública (anonimo + usuario)
         icacls "$userRoot\general" /grant "IUSR:(OI)(CI)RX" /T | Out-Null
         icacls "$userRoot\general" /grant "${usuario}:(OI)(CI)M" /T | Out-Null
 
-        # Carpeta de grupo
         icacls "$userRoot\$grupo" /grant "${usuario}:(OI)(CI)M" /T | Out-Null
 
-        Print-Completado "Usuario '$usuario' creado correctamente"
+        Print-Completado "Usuario creado"
     }
 }
+
 # ============================================================
-# CAMBIAR GRUPO
+# CAMBIO DE GRUPO
 # ============================================================
 if ($c) {
 
@@ -238,16 +209,8 @@ if ($c) {
         $nuevoGrupo = Read-Host "Nuevo grupo (reprobados/recursadores)"
     } while (-not (Validar-Grupo $nuevoGrupo))
 
-    $oldReprob = icacls "$FTP_ROOT\reprobados" 2>&1
-    $oldRecurs = icacls "$FTP_ROOT\recursadores" 2>&1
-
-    if ($oldReprob -match $usuario) {
-        icacls "$FTP_ROOT\reprobados" /remove $usuario | Out-Null
-    }
-
-    if ($oldRecurs -match $usuario) {
-        icacls "$FTP_ROOT\recursadores" /remove $usuario | Out-Null
-    }
+    icacls "$FTP_ROOT\reprobados" /remove $usuario 2>$null
+    icacls "$FTP_ROOT\recursadores" /remove $usuario 2>$null
 
     icacls "$FTP_ROOT\$nuevoGrupo" /grant "${usuario}:(OI)(CI)M" | Out-Null
 
