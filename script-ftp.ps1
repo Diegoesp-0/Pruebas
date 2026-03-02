@@ -128,46 +128,53 @@ if ($u) {
 
     Print-Titulo "CREACION USUARIOS FTP"
 
-    # ---------- Cantidad usuarios ----------
+    # ====================================================
+    # Cantidad de usuarios (validación robusta)
+    # ====================================================
     do {
+
         $cantidadStr = Read-Host "Cuantos usuarios desea crear"
+        $cantidadStr = $cantidadStr.Trim()
 
-        try {
-            $cantidad = [int]$cantidadStr
-        }
-        catch {
-            $cantidad = 0
-        }
+        $esNumero = [int]::TryParse($cantidadStr, [ref]$cantidad)
 
-        if ($cantidad -lt 1) {
+        if (-not $esNumero -or $cantidad -lt 1) {
             Print-Error "Ingrese un numero valido mayor a 0"
+            $cantidad = 0
         }
 
     } while ($cantidad -lt 1)
 
-    # ---------- Crear usuarios ----------
+    # ====================================================
+    # Creación masiva de usuarios
+    # ====================================================
     for ($i = 1; $i -le $cantidad; $i++) {
 
         Print-Titulo "Usuario $i de $cantidad"
 
+        # ---------- Usuario ----------
         do {
             $usuario = Read-Host "Usuario"
         } while (-not (Validar-Usuario $usuario))
 
         if (Get-LocalUser -Name $usuario -ErrorAction SilentlyContinue) {
-            Print-Error "Usuario existe"
+            Print-Error "El usuario ya existe"
             continue
         }
 
+        # ---------- Password ----------
         do {
             $password = Read-Host "Password"
         } while ($password.Length -lt 4)
 
+        # ---------- Grupo ----------
         do {
             $grupo = Read-Host "Grupo (reprobados/recursadores)"
         } while (-not (Validar-Grupo $grupo))
 
+        # ====================================================
         # Crear usuario Windows
+        # ====================================================
         $passSecure = ConvertTo-SecureString $password -AsPlainText -Force
 
         New-LocalUser `
@@ -176,7 +183,9 @@ if ($u) {
             -PasswordNeverExpires `
             -UserMayNotChangePassword | Out-Null
 
-        # ---------- Estructura FTP ----------
+        # ====================================================
+        # Estructura FTP
+        # ====================================================
         $userRoot = "$FTP_ROOT\$usuario"
 
         $paths = @(
@@ -190,19 +199,28 @@ if ($u) {
             New-Item -Path $p -ItemType Directory -Force | Out-Null
         }
 
-        # ---------- Permisos ----------
+        # ====================================================
+        # Permisos NTFS (ACL Seguros)
+        # ====================================================
+
+        # Limpiar herencia
+        icacls $userRoot /inheritance:r /T | Out-Null
+
+        # Permisos base del sistema
         icacls $userRoot /grant "SYSTEM:(OI)(CI)F" /T | Out-Null
         icacls $userRoot /grant "Administrators:(OI)(CI)F" /T | Out-Null
+
+        # Usuario propietario
         icacls $userRoot /grant "${usuario}:(OI)(CI)F" /T | Out-Null
 
-        # Anónimo solo lectura
+        # Carpeta pública (anonimo + usuario)
         icacls "$userRoot\general" /grant "IUSR:(OI)(CI)RX" /T | Out-Null
         icacls "$userRoot\general" /grant "${usuario}:(OI)(CI)M" /T | Out-Null
 
-        # Grupo
+        # Carpeta de grupo
         icacls "$userRoot\$grupo" /grant "${usuario}:(OI)(CI)M" /T | Out-Null
 
-        Print-Completado "Usuario creado correctamente"
+        Print-Completado "Usuario '$usuario' creado correctamente"
     }
 }
 # ============================================================
