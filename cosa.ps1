@@ -1,8 +1,13 @@
-# Ver permisos exactos que tiene diego sobre su carpeta home
-icacls "C:\FTP\LocalUser\diego"
-
 $usuario = "diego"
-icacls "C:\FTP\LocalUser\$usuario" /grant "${usuario}:(OI)(CI)F" /T
-icacls "C:\FTP" /grant "${usuario}:(RX)"
-icacls "C:\FTP\LocalUser" /grant "${usuario}:(RX)"
+$equipo = $env:COMPUTERNAME
+
+# Quitar herencia y aplicar permisos directos
+icacls "C:\FTP\LocalUser\$usuario" /inheritance:d
+icacls "C:\FTP\LocalUser\$usuario" /grant "${equipo}\${usuario}:(OI)(CI)F"
+icacls "C:\FTP\LocalUser\$usuario" /grant "Administrators:(OI)(CI)F"
+icacls "C:\FTP\LocalUser\$usuario" /grant "SYSTEM:(OI)(CI)F"
+
+# Verificar
+icacls "C:\FTP\LocalUser\$usuario"
+
 Restart-Service FTPSVC -Force
