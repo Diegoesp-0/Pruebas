@@ -221,7 +221,7 @@ if ($i) {
     }
 
     # ---------- 4. Crear estructura de directorios ----------
-    Print-Info "Creando estructura de directorios en $FTP_ROOT..."
+    Print-Info "Creando estructura de directorios en ${FTP_ROOT}..."
 
     $dirsReales = @(
         $FTP_ROOT,
