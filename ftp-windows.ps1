@@ -1,6 +1,6 @@
 # ============================================================
 # ftp-windows.ps1 - Instalacion y gestion de servidor FTP
-# Windows Server Core - IIS + FTP Service
+# Windows Server Core - IIS + FTP Service (FTP Plano, sin SSL)
 # Puerto: 22
 # Uso:
 #   .\ftp-windows.ps1 -i   => Instalar y configurar FTP
@@ -62,9 +62,6 @@ function Configurar-PermisosBase {
     icacls "$FTP_ROOT\reprobados" /grant "reprobados:(OI)(CI)M" 2>&1 | Out-Null
     icacls "$FTP_ROOT\recursadores" /grant "recursadores:(OI)(CI)M" 2>&1 | Out-Null
 
-    # Quitar cualquier permiso heredado que pueda dar acceso a otros
-    # (Opcional) pero no necesario si las ACLs estan bien.
-
     Print-Completado "Permisos base configurados."
 }
 
@@ -107,6 +104,31 @@ function Habilitar-ABE {
         Print-Completado "Access Based Enumeration (ABE) habilitado."
     } catch {
         Print-Error "No se pudo habilitar ABE. Asegurese que el sitio existe."
+    }
+}
+
+# ============================================================
+# FUNCION: Deshabilitar SSL completamente (solo FTP plano)
+# ============================================================
+function Deshabilitar-SSL-Completamente {
+    Print-Info "Deshabilitando SSL completamente (modo FTP plano)..."
+
+    try {
+        # Deshabilitar SSL en el canal de control
+        Set-ItemProperty "IIS:\Sites\$SITE_NAME" -Name ftpServer.security.ssl.controlChannelPolicy -Value "SslDisable" -ErrorAction Stop
+        
+        # Deshabilitar SSL en el canal de datos
+        Set-ItemProperty "IIS:\Sites\$SITE_NAME" -Name ftpServer.security.ssl.dataChannelPolicy -Value "SslDisable" -ErrorAction Stop
+        
+        Print-Completado "SSL deshabilitado completamente. El servidor ahora acepta solo FTP plano."
+    } catch {
+        Print-Error "No se pudo deshabilitar SSL con PowerShell. Intentando metodo alternativo..."
+        
+        # Metodo alternativo usando appcmd
+        & "$env:SystemRoot\System32\inetsrv\appcmd.exe" set config -section:system.ftpServer/security/ssl /controlChannelPolicy:"SslDisable" /commit:apphost | Out-Null
+        & "$env:SystemRoot\System32\inetsrv\appcmd.exe" set config -section:system.ftpServer/security/ssl /dataChannelPolicy:"SslDisable" /commit:apphost | Out-Null
+        
+        Print-Completado "SSL deshabilitado usando appcmd."
     }
 }
 
@@ -234,13 +256,16 @@ if ($i) {
 
     Print-Completado "Reglas de autorizacion configuradas."
 
+    # ---------- Deshabilitar SSL completamente (FTP plano) ----------
+    Deshabilitar-SSL-Completamente
+
     # ---------- Habilitar y arrancar servicio FTP ----------
     Print-Info "Arrancando servicio FTPSVC..."
     Set-Service -Name FTPSVC -StartupType Automatic
     Start-Service -Name FTPSVC -ErrorAction SilentlyContinue
     Start-WebSite -Name $SITE_NAME -ErrorAction SilentlyContinue
 
-    Print-Completado "Servidor FTP listo y escuchando en el puerto $PORT"
+    Print-Completado "Servidor FTP listo y escuchando en el puerto $PORT (FTP plano, sin SSL)"
     Print-Info "Estructura de directorios en ${FTP_ROOT}:"
     Print-Info "  general        (anonimo: lectura, autenticados: escritura)"
     Print-Info "  reprobados     (solo miembros del grupo reprobados: escritura)"
@@ -335,16 +360,11 @@ if ($u) {
         # Carpeta personal: control total para el usuario
         icacls $userDir /grant "${usuario}:(OI)(CI)F" | Out-Null
 
-        # Nota: Los permisos para general y grupo ya estan asignados mediante grupos y autenticados,
-        # pero aseguramos que el usuario tenga acceso explicito si es necesario (redundante pero seguro)
-        # General: el grupo Authenticated Users ya tiene Modify, asi que no hace falta.
-        # Grupo: el grupo local ya tiene Modify, y el usuario pertenece a el.
-
         Print-Completado "Permisos asignados para '$usuario'."
     }
 
     Print-Titulo "CREACION DE USUARIOS COMPLETADA"
-    Print-Info "Puede probar el acceso con un cliente FTP (puerto $PORT)."
+    Print-Info "Puede probar el acceso con un cliente FTP (puerto $PORT, FTP plano)."
 }
 
 # ============================================================
@@ -397,10 +417,6 @@ if ($c) {
     # Agregar al nuevo grupo
     Add-LocalGroupMember -Group $nuevoGrupo -Member $usuario
     Print-Completado "Usuario agregado al grupo '$nuevoGrupo'."
-
-    # Nota: Los permisos en las carpetas de grupo ya estan asignados a los grupos,
-    # por lo que no es necesario modificar ACLs explicitas. Con ABE, el usuario
-    # vera la carpeta del nuevo grupo y la del anterior dejara de ser visible.
 
     Print-Completado "Grupo actualizado correctamente."
     Print-Info "Usuario '$usuario' ahora pertenece a: $nuevoGrupo"
