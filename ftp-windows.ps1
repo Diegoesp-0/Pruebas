@@ -241,7 +241,7 @@ if ($i) {
     Start-WebSite -Name $SITE_NAME -ErrorAction SilentlyContinue
 
     Print-Completado "Servidor FTP listo y escuchando en el puerto $PORT"
-    Print-Info "Estructura de directorios en $FTP_ROOT:"
+    Print-Info "Estructura de directorios en ${FTP_ROOT}:"
     Print-Info "  general        (anonimo: lectura, autenticados: escritura)"
     Print-Info "  reprobados     (solo miembros del grupo reprobados: escritura)"
     Print-Info "  recursadores   (solo miembros del grupo recursadores: escritura)"
