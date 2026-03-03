@@ -27,19 +27,35 @@ function Cargar-WebAdmin {
 }
 
 # ============================================================
+# FUNCION AUXILIAR: Aplicar permisos con reintento
+# icacls a veces falla silenciosamente, lo corremos dos veces para asegurar
+# ============================================================
+function Aplicar-Permiso {
+    param(
+        [string]$ruta,
+        [string]$permiso
+    )
+    icacls $ruta $permiso.Split(" ") 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 200
+    icacls $ruta $permiso.Split(" ") 2>&1 | Out-Null
+}
+
+# ============================================================
 # FUNCION AUXILIAR: Crear raiz de aislamiento del usuario
 #
 # IIS FTP modo 3 (IsolateUsers) busca:
-#   C:\FTP\LocalUser\<usuario>\   <- esto es la raiz / que ve el usuario
+#   C:\FTP\LocalUser\<usuario>\   <- raiz / que ve el usuario al conectarse
 #
-# Dentro creamos junctions a las carpetas reales:
+# Dentro creamos junctions (accesos directos de carpeta) a las carpetas reales:
 #   general   -> C:\FTP\_general
 #   <grupo>   -> C:\FTP\_<grupo>
 #   <usuario> -> C:\FTP\_usuarios\<usuario>
 #
-# Permisos NTFS:
-#   - El usuario necesita RX en su raiz de aislamiento para que IIS no rechace el login
-#   - Las carpetas reales tienen los permisos de lectura/escritura correspondientes
+# Capas de permisos necesarias para que IIS FTP acepte el login:
+#   1. SYSTEM y Administrators: control total en todo (requerido por IIS internamente)
+#   2. NETWORK SERVICE: RX en LocalUser y en la raiz del usuario (IIS corre como este)
+#   3. IIS_IUSRS: RX en LocalUser y en la raiz del usuario (grupo de procesos IIS)
+#   4. El propio usuario: RX en su raiz de aislamiento, M o F en las carpetas reales
 # ============================================================
 function Crear-RaizUsuario {
     param(
@@ -49,7 +65,7 @@ function Crear-RaizUsuario {
 
     $raiz = "$FTP_ROOT\LocalUser\$usuario"
 
-    # Crear raiz de aislamiento
+    # ---- Crear raiz de aislamiento ----
     if (-not (Test-Path $raiz)) {
         New-Item -Path $raiz -ItemType Directory -Force | Out-Null
     }
@@ -76,17 +92,49 @@ function Crear-RaizUsuario {
         cmd /c "mklink /J `"$linkPersonal`" `"$dirPersonal`"" | Out-Null
     }
 
-    # ---- Permisos NTFS en la raiz de aislamiento ----
-    # RX en la raiz para que IIS FTP acepte el login y el usuario pueda listar
-    icacls $raiz /grant "${usuario}:(OI)(CI)RX" /T 2>&1 | Out-Null
+    # ================================================================
+    # PERMISOS NTFS EN LA RAIZ DE AISLAMIENTO
+    # IIS FTP necesita poder leer esta carpeta para aceptar el login.
+    # Si cualquiera de estas cuentas no tiene acceso => error 530.
+    # ================================================================
 
-    # ---- Permisos NTFS en las carpetas reales ----
-    # general:        escritura (M = leer + escribir + borrar)
-    icacls "$FTP_ROOT\_general"  /grant "${usuario}:(OI)(CI)M" 2>&1 | Out-Null
-    # grupo propio:   escritura
-    icacls "$FTP_ROOT\_$grupo"   /grant "${usuario}:(OI)(CI)M" 2>&1 | Out-Null
-    # carpeta propia: control total
-    icacls "$dirPersonal"        /grant "${usuario}:(OI)(CI)F" 2>&1 | Out-Null
+    # SYSTEM: control total (requerido por Windows internamente)
+    icacls $raiz /grant "SYSTEM:(OI)(CI)F"           2>&1 | Out-Null
+    # Administrators: control total
+    icacls $raiz /grant "Administrators:(OI)(CI)F"   2>&1 | Out-Null
+    # NETWORK SERVICE: RX (IIS FTP Service corre como esta cuenta)
+    icacls $raiz /grant "NETWORK SERVICE:(OI)(CI)RX" 2>&1 | Out-Null
+    # IIS_IUSRS: RX (grupo de cuentas de trabajo de IIS)
+    icacls $raiz /grant "IIS_IUSRS:(OI)(CI)RX"       2>&1 | Out-Null
+    # El propio usuario: RX en su raiz para poder listar sus carpetas
+    icacls $raiz /grant "${usuario}:(OI)(CI)RX"       2>&1 | Out-Null
+
+    # ================================================================
+    # PERMISOS NTFS EN LAS CARPETAS REALES (destino de los junctions)
+    # Los junctions son transparentes: el permiso que importa es el de
+    # la carpeta real a la que apuntan, no el del junction en si.
+    # ================================================================
+
+    # _general: el usuario puede leer y escribir (M = Modify)
+    icacls "$FTP_ROOT\_general" /grant "SYSTEM:(OI)(CI)F"             2>&1 | Out-Null
+    icacls "$FTP_ROOT\_general" /grant "Administrators:(OI)(CI)F"     2>&1 | Out-Null
+    icacls "$FTP_ROOT\_general" /grant "NETWORK SERVICE:(OI)(CI)RX"   2>&1 | Out-Null
+    icacls "$FTP_ROOT\_general" /grant "IIS_IUSRS:(OI)(CI)RX"         2>&1 | Out-Null
+    icacls "$FTP_ROOT\_general" /grant "${usuario}:(OI)(CI)M"         2>&1 | Out-Null
+
+    # _<grupo> propio: el usuario puede leer y escribir (M)
+    icacls "$FTP_ROOT\_$grupo"  /grant "SYSTEM:(OI)(CI)F"             2>&1 | Out-Null
+    icacls "$FTP_ROOT\_$grupo"  /grant "Administrators:(OI)(CI)F"     2>&1 | Out-Null
+    icacls "$FTP_ROOT\_$grupo"  /grant "NETWORK SERVICE:(OI)(CI)RX"   2>&1 | Out-Null
+    icacls "$FTP_ROOT\_$grupo"  /grant "IIS_IUSRS:(OI)(CI)RX"         2>&1 | Out-Null
+    icacls "$FTP_ROOT\_$grupo"  /grant "${usuario}:(OI)(CI)M"         2>&1 | Out-Null
+
+    # Carpeta personal: control total solo para el dueno (F = Full)
+    icacls "$dirPersonal"       /grant "SYSTEM:(OI)(CI)F"             2>&1 | Out-Null
+    icacls "$dirPersonal"       /grant "Administrators:(OI)(CI)F"     2>&1 | Out-Null
+    icacls "$dirPersonal"       /grant "NETWORK SERVICE:(OI)(CI)RX"   2>&1 | Out-Null
+    icacls "$dirPersonal"       /grant "IIS_IUSRS:(OI)(CI)RX"         2>&1 | Out-Null
+    icacls "$dirPersonal"       /grant "${usuario}:(OI)(CI)F"         2>&1 | Out-Null
 
     Print-Completado "Raiz de aislamiento lista para '$usuario' (grupo: $grupo)"
     Print-Info "  Ve: /general, /$grupo, /$usuario"
@@ -94,7 +142,6 @@ function Crear-RaizUsuario {
 
 # ============================================================
 # FUNCION AUXILIAR: Detectar grupo actual de un usuario (por permisos ACL)
-# Busca en cual carpeta de grupo tiene permiso M (modificar = su grupo)
 # ============================================================
 function Obtener-GrupoActual {
     param([string]$usuario)
@@ -194,30 +241,58 @@ if ($i) {
         }
     }
 
-    # ---------- 5. Permisos NTFS base ----------
+    # ---------- 5. Permisos NTFS base en la raiz FTP ----------
     Print-Info "Configurando permisos NTFS base..."
 
-    # Administrators con control total en todo el arbol
-    icacls $FTP_ROOT /grant "Administrators:(OI)(CI)F" /T 2>&1 | Out-Null
+    # Raiz C:\FTP: SYSTEM y Administrators con control total
+    # NETWORK SERVICE e IIS_IUSRS con RX para que IIS pueda navegar el arbol
+    icacls $FTP_ROOT /grant "SYSTEM:(OI)(CI)F"           /T 2>&1 | Out-Null
+    icacls $FTP_ROOT /grant "Administrators:(OI)(CI)F"   /T 2>&1 | Out-Null
+    icacls $FTP_ROOT /grant "NETWORK SERVICE:(OI)(CI)RX" /T 2>&1 | Out-Null
+    icacls $FTP_ROOT /grant "IIS_IUSRS:(OI)(CI)RX"       /T 2>&1 | Out-Null
+    Print-Completado "Raiz $FTP_ROOT: permisos base aplicados."
 
-    # _reprobados y _recursadores: deshabilitar herencia y bloquear anonymous
-    # Los usuarios autenticados reciben permisos al crearse con -u
-    foreach ($carpeta in @("_reprobados", "_recursadores", "_usuarios")) {
-        icacls "$FTP_ROOT\$carpeta" /inheritance:d                    2>&1 | Out-Null
-        icacls "$FTP_ROOT\$carpeta" /remove "IUSR"                    2>&1 | Out-Null
-        icacls "$FTP_ROOT\$carpeta" /remove "IIS_IUSRS"               2>&1 | Out-Null
-        icacls "$FTP_ROOT\$carpeta" /grant "Administrators:(OI)(CI)F" 2>&1 | Out-Null
-        Print-Completado "$carpeta : anonymous sin acceso."
+    # ---------- 6. Permisos en LocalUser ----------
+    # IIS FTP necesita leer C:\FTP\LocalUser\ para encontrar las raices de aislamiento
+    icacls "$FTP_ROOT\LocalUser" /grant "SYSTEM:(OI)(CI)F"           2>&1 | Out-Null
+    icacls "$FTP_ROOT\LocalUser" /grant "Administrators:(OI)(CI)F"   2>&1 | Out-Null
+    icacls "$FTP_ROOT\LocalUser" /grant "NETWORK SERVICE:(OI)(CI)RX" 2>&1 | Out-Null
+    icacls "$FTP_ROOT\LocalUser" /grant "IIS_IUSRS:(OI)(CI)RX"       2>&1 | Out-Null
+    Print-Completado "LocalUser: permisos para IIS aplicados."
+
+    # ---------- 7. Permisos en carpetas de grupo ----------
+    # _reprobados y _recursadores: solo Administrators + SYSTEM + IIS base
+    # IUSR NO tiene acceso (anonymous no debe entrar aqui)
+    # Los usuarios autenticados reciben M al momento de crearse con -u
+    foreach ($carpeta in @("_reprobados", "_recursadores")) {
+        icacls "$FTP_ROOT\$carpeta" /inheritance:d                        2>&1 | Out-Null
+        icacls "$FTP_ROOT\$carpeta" /remove "IUSR"                        2>&1 | Out-Null
+        icacls "$FTP_ROOT\$carpeta" /remove "IIS_IUSRS"                   2>&1 | Out-Null
+        icacls "$FTP_ROOT\$carpeta" /grant "SYSTEM:(OI)(CI)F"             2>&1 | Out-Null
+        icacls "$FTP_ROOT\$carpeta" /grant "Administrators:(OI)(CI)F"     2>&1 | Out-Null
+        icacls "$FTP_ROOT\$carpeta" /grant "NETWORK SERVICE:(OI)(CI)RX"   2>&1 | Out-Null
+        Print-Completado "$carpeta: anonymous sin acceso, IIS con RX."
     }
 
-    # _general: anonymous puede leer (IUSR con RX)
-    icacls "$FTP_ROOT\_general" /grant "IUSR:(OI)(CI)RX"      2>&1 | Out-Null
-    icacls "$FTP_ROOT\_general" /grant "IIS_IUSRS:(OI)(CI)RX" 2>&1 | Out-Null
+    # _usuarios: mismo tratamiento, anonymous no entra
+    icacls "$FTP_ROOT\_usuarios" /inheritance:d                        2>&1 | Out-Null
+    icacls "$FTP_ROOT\_usuarios" /remove "IUSR"                        2>&1 | Out-Null
+    icacls "$FTP_ROOT\_usuarios" /remove "IIS_IUSRS"                   2>&1 | Out-Null
+    icacls "$FTP_ROOT\_usuarios" /grant "SYSTEM:(OI)(CI)F"             2>&1 | Out-Null
+    icacls "$FTP_ROOT\_usuarios" /grant "Administrators:(OI)(CI)F"     2>&1 | Out-Null
+    icacls "$FTP_ROOT\_usuarios" /grant "NETWORK SERVICE:(OI)(CI)RX"   2>&1 | Out-Null
+    Print-Completado "_usuarios: anonymous sin acceso, IIS con RX."
+
+    # _general: IUSR con RX (anonymous puede leer aqui)
+    icacls "$FTP_ROOT\_general" /grant "SYSTEM:(OI)(CI)F"             2>&1 | Out-Null
+    icacls "$FTP_ROOT\_general" /grant "Administrators:(OI)(CI)F"     2>&1 | Out-Null
+    icacls "$FTP_ROOT\_general" /grant "NETWORK SERVICE:(OI)(CI)RX"   2>&1 | Out-Null
+    icacls "$FTP_ROOT\_general" /grant "IIS_IUSRS:(OI)(CI)RX"         2>&1 | Out-Null
+    icacls "$FTP_ROOT\_general" /grant "IUSR:(OI)(CI)RX"              2>&1 | Out-Null
     Print-Completado "_general: anonymous con lectura (RX)."
 
-    # ---------- 6. Raiz de aislamiento para anonymous ----------
+    # ---------- 8. Raiz de aislamiento para anonymous ----------
     # IIS FTP modo 3 busca C:\FTP\LocalUser\Public\ para el usuario anonymous
-    # Solo ponemos junction a _general, que es lo unico que debe ver
     Print-Info "Creando raiz de aislamiento para anonymous..."
 
     $publicRoot = "$FTP_ROOT\LocalUser\Public"
@@ -230,12 +305,15 @@ if ($i) {
         cmd /c "mklink /J `"$publicGeneral`" `"$FTP_ROOT\_general`"" | Out-Null
     }
 
-    # IUSR necesita RX en la raiz Public para que IIS acepte el login anonimo
-    icacls $publicRoot /grant "IUSR:(OI)(CI)RX"      /T 2>&1 | Out-Null
-    icacls $publicRoot /grant "IIS_IUSRS:(OI)(CI)RX" /T 2>&1 | Out-Null
+    # Permisos en la raiz Public: IIS necesita leerla para aceptar el login anonimo
+    icacls $publicRoot /grant "SYSTEM:(OI)(CI)F"             2>&1 | Out-Null
+    icacls $publicRoot /grant "Administrators:(OI)(CI)F"     2>&1 | Out-Null
+    icacls $publicRoot /grant "NETWORK SERVICE:(OI)(CI)RX"   2>&1 | Out-Null
+    icacls $publicRoot /grant "IIS_IUSRS:(OI)(CI)RX"         2>&1 | Out-Null
+    icacls $publicRoot /grant "IUSR:(OI)(CI)RX"              2>&1 | Out-Null
     Print-Completado "Raiz anonima lista: anonymous ve solo /general en lectura."
 
-    # ---------- 7. Detener sitio Default Web Site ----------
+    # ---------- 9. Detener sitio Default Web Site ----------
     $defaultSite = Get-WebSite -Name "Default Web Site" -ErrorAction SilentlyContinue
     if ($defaultSite) {
         Stop-WebSite -Name "Default Web Site" -ErrorAction SilentlyContinue
@@ -243,7 +321,7 @@ if ($i) {
         Print-Info "Sitio 'Default Web Site' detenido."
     }
 
-    # ---------- 8. Crear o actualizar sitio FTP ----------
+    # ---------- 10. Crear o actualizar sitio FTP ----------
     $sitioExiste = Get-WebSite -Name $SITE_NAME -ErrorAction SilentlyContinue
 
     if ($sitioExiste) {
@@ -260,7 +338,7 @@ if ($i) {
         -Force | Out-Null
     Print-Completado "Sitio FTP creado."
 
-    # ---------- 9. Modo de aislamiento ----------
+    # ---------- 11. Modo de aislamiento ----------
     # Modo 3 = IsolateUsers
     # Cada usuario ve SOLO su carpeta en C:\FTP\LocalUser\<usuario>\
     # Anonymous ve SOLO C:\FTP\LocalUser\Public\
@@ -269,7 +347,7 @@ if ($i) {
         -Value 3
     Print-Completado "Modo de aislamiento: IsolateUsers (modo 3)."
 
-    # ---------- 10. Autenticacion ----------
+    # ---------- 12. Autenticacion ----------
     Set-ItemProperty "IIS:\Sites\$SITE_NAME" `
         -Name ftpServer.security.authentication.anonymousAuthentication.enabled `
         -Value $true
@@ -280,7 +358,7 @@ if ($i) {
 
     Print-Completado "Autenticacion anonima y basica habilitadas."
 
-    # ---------- 11. Reglas de autorizacion FTP ----------
+    # ---------- 13. Reglas de autorizacion FTP ----------
     Print-Info "Configurando reglas de autorizacion FTP..."
 
     Clear-WebConfiguration `
@@ -289,7 +367,8 @@ if ($i) {
         -Location $SITE_NAME `
         -ErrorAction SilentlyContinue
 
-    # Anonymous: solo lectura a nivel FTP (el aislamiento ya limita que carpetas ve)
+    # Anonymous: solo lectura a nivel FTP
+    # El aislamiento modo 3 ya garantiza que solo ve LocalUser\Public\
     Add-WebConfiguration `
         -PSPath "IIS:\" `
         -Filter "system.ftpServer/security/authorization" `
@@ -301,7 +380,8 @@ if ($i) {
             permissions = "Read"
         }
 
-    # Usuarios autenticados: lectura y escritura (NTFS controla donde exactamente)
+    # Usuarios autenticados: lectura y escritura
+    # NTFS controla exactamente que pueden hacer en cada carpeta
     Add-WebConfiguration `
         -PSPath "IIS:\" `
         -Filter "system.ftpServer/security/authorization" `
@@ -315,23 +395,23 @@ if ($i) {
 
     Print-Completado "Reglas de autorizacion configuradas."
 
-    # ---------- 12. SSL ----------
+    # ---------- 14. SSL ----------
     Set-ItemProperty "IIS:\Sites\$SITE_NAME" `
         -Name ftpServer.security.ssl.controlChannelPolicy `
-        -Value 0
+        -Value 0   # 0 = SslAllow, no forzar SSL
     Set-ItemProperty "IIS:\Sites\$SITE_NAME" `
         -Name ftpServer.security.ssl.dataChannelPolicy `
         -Value 0
     Print-Completado "SSL configurado como opcional (sin forzar)."
 
-    # ---------- 13. Arrancar servicio ----------
+    # ---------- 15. Arrancar servicio ----------
     Print-Info "Arrancando servicio FTPSVC..."
     Set-Service -Name FTPSVC -StartupType Automatic
     Restart-Service FTPSVC -Force
     Start-Sleep -Seconds 3
     Start-WebSite -Name $SITE_NAME -ErrorAction SilentlyContinue
 
-    # ---------- 14. Verificacion ----------
+    # ---------- 16. Verificacion ----------
     $estado = (Get-WebSite -Name $SITE_NAME).state
     if ($estado -eq "Started") {
         Print-Completado "Sitio FTP arrancado correctamente."
@@ -340,7 +420,9 @@ if ($i) {
         Print-Info "Revisa: Get-EventLog -LogName Application -Source *ftp* -Newest 10"
     }
 
-    $ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -ne "127.0.0.1" } | Select-Object -First 1).IPAddress
+    $ip = (Get-NetIPAddress -AddressFamily IPv4 |
+           Where-Object { $_.IPAddress -ne "127.0.0.1" } |
+           Select-Object -First 1).IPAddress
 
     Print-Titulo "SERVIDOR FTP LISTO"
     Print-Info "  IP del servidor  : $ip"
@@ -349,8 +431,8 @@ if ($i) {
     Print-Info "  Raiz FTP en disco: $FTP_ROOT"
     Print-Info ""
     Print-Info "Lo que ve cada usuario al conectarse:"
-    Print-Info "  anonymous        => /general (solo lectura)"
-    Print-Info "  usuario autent.  => /general (escritura) + /<grupo> (escritura) + /<usuario> (total)"
+    Print-Info "  anonymous       => /general (solo lectura)"
+    Print-Info "  autenticado     => /general (escritura) + /<grupo> (escritura) + /<usuario> (total)"
     Print-Info ""
     Print-Info "Ahora puede crear usuarios con: .\ftp-windows.ps1 -u"
 }
@@ -427,23 +509,24 @@ if ($u) {
                 -PasswordNeverExpires `
                 -UserMayNotChangePassword `
                 -Description "Usuario FTP - Grupo: $grupo" | Out-Null
-            Print-Completado "Usuario '$usuario' creado."
+            Print-Completado "Usuario Windows '$usuario' creado."
         } catch {
             Print-Error "Error al crear usuario '$usuario': $_"
             continue
         }
 
-        # --- Crear raiz de aislamiento + junctions + permisos NTFS ---
+        # --- Crear raiz de aislamiento + junctions + todos los permisos NTFS ---
         Crear-RaizUsuario -usuario $usuario -grupo $grupo
 
         Print-Completado "Usuario '$usuario' listo."
-        Print-Info "  Raiz FTP        : $FTP_ROOT\LocalUser\$usuario\"
+        Print-Info "  Raiz FTP         : $FTP_ROOT\LocalUser\$usuario\"
         Print-Info "  Carpetas visibles: /general, /$grupo, /$usuario"
     }
 
+    # Reiniciar servicio para que IIS cargue los nuevos usuarios y permisos
     Print-Info "Reiniciando servicio FTPSVC..."
     Restart-Service FTPSVC -Force
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 3
     Start-WebSite -Name $SITE_NAME -ErrorAction SilentlyContinue
     Print-Completado "Servicio reiniciado."
 
@@ -493,14 +576,18 @@ if ($c) {
 
     # --- Quitar permisos del grupo anterior ---
     if ($grupoActual -ne "") {
-        Print-Info "Quitando acceso a '$grupoActual'..."
+        Print-Info "Quitando acceso a '_$grupoActual'..."
         icacls "$FTP_ROOT\_$grupoActual" /remove $usuario 2>&1 | Out-Null
         Print-Completado "Permisos removidos de '_$grupoActual'."
     }
 
-    # --- Dar permisos en el nuevo grupo ---
-    Print-Info "Asignando acceso a '$nuevoGrupo'..."
-    icacls "$FTP_ROOT\_$nuevoGrupo" /grant "${usuario}:(OI)(CI)M" 2>&1 | Out-Null
+    # --- Dar permisos en el nuevo grupo (M + cuentas de IIS) ---
+    Print-Info "Asignando acceso a '_$nuevoGrupo'..."
+    icacls "$FTP_ROOT\_$nuevoGrupo" /grant "SYSTEM:(OI)(CI)F"           2>&1 | Out-Null
+    icacls "$FTP_ROOT\_$nuevoGrupo" /grant "Administrators:(OI)(CI)F"   2>&1 | Out-Null
+    icacls "$FTP_ROOT\_$nuevoGrupo" /grant "NETWORK SERVICE:(OI)(CI)RX" 2>&1 | Out-Null
+    icacls "$FTP_ROOT\_$nuevoGrupo" /grant "IIS_IUSRS:(OI)(CI)RX"       2>&1 | Out-Null
+    icacls "$FTP_ROOT\_$nuevoGrupo" /grant "${usuario}:(OI)(CI)M"       2>&1 | Out-Null
     Print-Completado "Permisos asignados en '_$nuevoGrupo'."
 
     # --- Actualizar junctions en la raiz de aislamiento ---
@@ -522,9 +609,10 @@ if ($c) {
         Print-Completado "Junction '$nuevoGrupo' creado."
     }
 
+    # Reiniciar servicio
     Print-Info "Reiniciando servicio FTPSVC..."
     Restart-Service FTPSVC -Force
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 3
     Start-WebSite -Name $SITE_NAME -ErrorAction SilentlyContinue
 
     Print-Completado "Grupo actualizado correctamente."
