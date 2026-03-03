@@ -29,8 +29,8 @@ function Cargar-WebAdmin {
 # ============================================================
 # FUNCION AUXILIAR: Asignar permisos NTFS al usuario en todas las carpetas
 #
-# Modo actual: SIN aislamiento. Todos los usuarios ven todo.
-# Los permisos NTFS controlan que puede hacer cada quien dentro.
+# Modo actual: SIN aislamiento. Todos los usuarios autenticados ven todo.
+# Anonymous solo puede ver _general en lectura.
 #
 # TODO: AISLAMIENTO - Cuando quieras activar el aislamiento por usuario:
 #   1. Cambiar ftpServer.userIsolation.mode a 3 (en seccion -i)
@@ -57,13 +57,10 @@ function Configurar-PermisosUsuario {
     # ---- general: todos los autenticados pueden leer y escribir ----
     icacls "$FTP_ROOT\_general" /grant "${usuario}:(OI)(CI)M" 2>&1 | Out-Null
 
-    # ---- carpeta de grupo: solo el grupo correspondiente ----
+    # ---- carpeta de grupo propio: escritura ----
     icacls "$FTP_ROOT\_$grupo" /grant "${usuario}:(OI)(CI)M" 2>&1 | Out-Null
 
-    # ---- carpeta personal: control total solo para el dueno ----
-    icacls "$dirPersonal" /grant "${usuario}:(OI)(CI)F" 2>&1 | Out-Null
-
-    # ---- otras carpetas de grupo: lectura (todos ven todo) ----
+    # ---- otras carpetas de grupo: solo lectura (todos ven todo) ----
     # TODO: AISLAMIENTO - Quitar estos dos bloques cuando actives el aislamiento,
     #       ya que con junctions el usuario no vera las carpetas de otros grupos.
     if ($grupo -ne "reprobados") {
@@ -73,15 +70,11 @@ function Configurar-PermisosUsuario {
         icacls "$FTP_ROOT\_recursadores" /grant "${usuario}:(OI)(CI)RX" 2>&1 | Out-Null
     }
 
-    # ---- carpetas personales de otros usuarios: solo lectura ----
+    # ---- carpeta _usuarios: lectura general, pero su carpeta personal tiene control total ----
     # TODO: AISLAMIENTO - Con junctions esto no es necesario porque el usuario
     #       no vera _usuarios\ directamente, solo su propia carpeta personal.
     icacls "$FTP_ROOT\_usuarios" /grant "${usuario}:(OI)(CI)RX" 2>&1 | Out-Null
-    # Pero su propia carpeta personal tiene control total (ya asignado arriba)
-    # icacls va en orden, el permiso mas especifico (F en $dirPersonal) prevalece
-    # sobre el heredado (RX de _usuarios), siempre que se aplique con /T o directamente.
-    # Por seguridad, reforzamos el F en la carpeta personal:
-    icacls "$dirPersonal" /grant "${usuario}:(OI)(CI)F" 2>&1 | Out-Null
+    icacls "$dirPersonal"        /grant "${usuario}:(OI)(CI)F"  2>&1 | Out-Null
 
     Print-Completado "Permisos configurados para '$usuario' (grupo: $grupo)"
 }
@@ -189,20 +182,45 @@ if ($i) {
     }
 
     # ---------- 5. Permisos NTFS base ----------
+    # Estrategia:
+    #   - C:\FTP raiz       : Administrators con control total
+    #   - _general          : IUSR + IIS_IUSRS con RX  => anonymous puede leer
+    #   - _reprobados       : herencia deshabilitada, IUSR removido => anonymous NO entra
+    #   - _recursadores     : igual que _reprobados
+    #   - _usuarios         : igual, anonymous NO entra
+    #   Los usuarios autenticados reciben sus permisos al momento de crearse (-u)
     Print-Info "Configurando permisos NTFS base..."
 
-    # Administradores: control total en todo
+    # Administrators con control total en todo el arbol (punto de partida)
     icacls $FTP_ROOT /grant "Administrators:(OI)(CI)F" /T 2>&1 | Out-Null
 
-    # Anonymous (IUSR): solo lectura en _general
-    # El resto de carpetas anonymous no puede ver (sin permiso NTFS)
-    icacls "$FTP_ROOT\_general"      /grant "IUSR:(OI)(CI)RX"     2>&1 | Out-Null
-    icacls "$FTP_ROOT\_general"      /grant "IIS_IUSRS:(OI)(CI)RX" 2>&1 | Out-Null
+    # -- _general: anonymous puede leer --
+    icacls "$FTP_ROOT\_general" /grant "IUSR:(OI)(CI)RX"      2>&1 | Out-Null
+    icacls "$FTP_ROOT\_general" /grant "IIS_IUSRS:(OI)(CI)RX" 2>&1 | Out-Null
+    Print-Completado "_general: anonymous con lectura (RX)."
 
-    # Anonymous NO tiene permisos en _reprobados, _recursadores, _usuarios
-    # (no hacemos /grant, asi que hereda solo lo del padre C:\FTP que es Administrators)
-    # TODO: AISLAMIENTO - Con junctions anonymous solo vera lo que este en LocalUser\Public\
-    #       por lo que estos bloqueos NTFS no seran necesarios, el aislamiento lo hace IIS.
+    # -- _reprobados: deshabilitar herencia y bloquear anonymous --
+    # /inheritance:d  => desconectar herencia del padre, conservar ACEs actuales como explicitos
+    # /remove         => quitar las entradas de IUSR e IIS_IUSRS
+    icacls "$FTP_ROOT\_reprobados" /inheritance:d                    2>&1 | Out-Null
+    icacls "$FTP_ROOT\_reprobados" /remove "IUSR"                    2>&1 | Out-Null
+    icacls "$FTP_ROOT\_reprobados" /remove "IIS_IUSRS"               2>&1 | Out-Null
+    icacls "$FTP_ROOT\_reprobados" /grant "Administrators:(OI)(CI)F" 2>&1 | Out-Null
+    Print-Completado "_reprobados: anonymous sin acceso."
+
+    # -- _recursadores: igual --
+    icacls "$FTP_ROOT\_recursadores" /inheritance:d                    2>&1 | Out-Null
+    icacls "$FTP_ROOT\_recursadores" /remove "IUSR"                    2>&1 | Out-Null
+    icacls "$FTP_ROOT\_recursadores" /remove "IIS_IUSRS"               2>&1 | Out-Null
+    icacls "$FTP_ROOT\_recursadores" /grant "Administrators:(OI)(CI)F" 2>&1 | Out-Null
+    Print-Completado "_recursadores: anonymous sin acceso."
+
+    # -- _usuarios: igual --
+    icacls "$FTP_ROOT\_usuarios" /inheritance:d                    2>&1 | Out-Null
+    icacls "$FTP_ROOT\_usuarios" /remove "IUSR"                    2>&1 | Out-Null
+    icacls "$FTP_ROOT\_usuarios" /remove "IIS_IUSRS"               2>&1 | Out-Null
+    icacls "$FTP_ROOT\_usuarios" /grant "Administrators:(OI)(CI)F" 2>&1 | Out-Null
+    Print-Completado "_usuarios: anonymous sin acceso."
 
     Print-Completado "Permisos NTFS base configurados."
 
@@ -237,7 +255,7 @@ if ($i) {
     Set-ItemProperty "IIS:\Sites\$SITE_NAME" `
         -Name ftpServer.userIsolation.mode `
         -Value 0
-    Print-Completado "Modo de aislamiento: Sin aislamiento (modo 0) - todos ven todo."
+    Print-Completado "Modo de aislamiento: Sin aislamiento (modo 0)."
 
     # ---------- 9. Autenticacion ----------
     Set-ItemProperty "IIS:\Sites\$SITE_NAME" `
@@ -259,7 +277,7 @@ if ($i) {
         -Location $SITE_NAME `
         -ErrorAction SilentlyContinue
 
-    # Anonymous: solo lectura (NTFS restringe a que carpetas puede entrar)
+    # Anonymous: solo lectura a nivel FTP (NTFS restringe a que carpetas puede entrar)
     Add-WebConfiguration `
         -PSPath "IIS:\" `
         -Filter "system.ftpServer/security/authorization" `
@@ -271,7 +289,7 @@ if ($i) {
             permissions = "Read"
         }
 
-    # Usuarios autenticados: lectura y escritura (NTFS controla donde)
+    # Usuarios autenticados: lectura y escritura (NTFS controla donde exactamente)
     Add-WebConfiguration `
         -PSPath "IIS:\" `
         -Filter "system.ftpServer/security/authorization" `
@@ -318,11 +336,11 @@ if ($i) {
     Print-Info "  Acceso anonimo   : ftp://$ip  (usuario: anonymous, pass: cualquier cosa)"
     Print-Info "  Raiz FTP en disco: $FTP_ROOT"
     Print-Info ""
-    Print-Info "Lo que ve cada usuario al conectarse (sin aislamiento):"
-    Print-Info "  /_general         => lectura (anonymous) / escritura (autenticados)"
-    Print-Info "  /_reprobados      => lectura (anonymous) / escritura (miembros del grupo)"
-    Print-Info "  /_recursadores    => lectura (anonymous) / escritura (miembros del grupo)"
-    Print-Info "  /_usuarios\<x>   => lectura (todos) / escritura total (solo el dueno)"
+    Print-Info "Lo que ve cada usuario al conectarse:"
+    Print-Info "  _general      => anonymous: LECTURA  / autenticados: escritura"
+    Print-Info "  _reprobados   => anonymous: SIN ACCESO / autenticados: segun grupo"
+    Print-Info "  _recursadores => anonymous: SIN ACCESO / autenticados: segun grupo"
+    Print-Info "  _usuarios\<x> => anonymous: SIN ACCESO / autenticados: lectura / dueno: total"
     Print-Info ""
     Print-Info "Ahora puede crear usuarios con: .\ftp-windows.ps1 -u"
 }
@@ -467,7 +485,6 @@ if ($c) {
     if ($grupoActual -ne "") {
         Print-Info "Quitando escritura en '$grupoActual'..."
         icacls "$FTP_ROOT\_$grupoActual" /remove $usuario 2>&1 | Out-Null
-        # Dejar solo lectura en el grupo anterior (todos ven todo)
         icacls "$FTP_ROOT\_$grupoActual" /grant "${usuario}:(OI)(CI)RX" 2>&1 | Out-Null
         Print-Completado "Acceso reducido a lectura en '$grupoActual'."
     }
@@ -478,6 +495,11 @@ if ($c) {
     icacls "$FTP_ROOT\_$nuevoGrupo" /grant "${usuario}:(OI)(CI)M" 2>&1 | Out-Null
     Print-Completado "Permisos de escritura asignados en '_$nuevoGrupo'."
 
+    # TODO: AISLAMIENTO - Cuando actives junctions tambien hay que:
+    #   1. Eliminar junction del grupo anterior:
+    #      cmd /c "rmdir `"$FTP_ROOT\LocalUser\$usuario\$grupoActual`""
+    #   2. Crear junction del nuevo grupo:
+    #      cmd /c "mklink /J `"$FTP_ROOT\LocalUser\$usuario\$nuevoGrupo`" `"$FTP_ROOT\_$nuevoGrupo`""
 
     Print-Info "Reiniciando servicio FTPSVC..."
     Restart-Service FTPSVC -Force
