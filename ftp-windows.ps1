@@ -156,6 +156,7 @@ try {
     } else {
         Write-Host "✗ Error: Puerto 2121 no está accesible" -ForegroundColor Red
     }
-} catch {
-    Write-Host "  No se pudo probar la conectividad" -ForegroundColor Yellow
+}
+catch {
+    Write-Host "  No se pudo probar la conectividad: $_" -ForegroundColor Yellow
 }
