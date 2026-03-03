@@ -1,5 +1,7 @@
-# Ver el XML completo del sitio FTP
+Import-Module WebAdministration
+Set-ItemProperty "IIS:\Sites\FTP-Servidor" -Name ftpServer.userIsolation.mode -Value 3
+Restart-Service FTPSVC -Force
+
 $configPath = "C:\Windows\System32\inetsrv\config\applicationHost.config"
-$config = [xml](Get-Content $configPath)
-$sitio = $config.configuration.'system.applicationHost'.sites.site | Where-Object { $_.name -eq "FTP-Servidor" }
-$sitio.OuterXml
+(Get-Content $configPath -Raw) -replace 'mode="IsolateAllDirectories"', 'mode="IsolateRootDirectoryOnly"' | Set-Content $configPath
+Restart-Service FTPSVC -Force
