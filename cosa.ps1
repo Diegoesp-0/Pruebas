@@ -1,18 +1,18 @@
+# 1. Cambiar el modo directamente sin tocar el XML
 Import-Module WebAdministration
+Set-ItemProperty "IIS:\Sites\FTP-Servidor" -Name ftpServer.userIsolation.mode -Value 0
 
-# Volver a modo None (que funciona)
+# 2. Ver por que no arranca FTPSVC
+sc.exe query FTPSVC
+net start FTPSVC
+# Ver el log de errores
+Get-EventLog -LogName System -Newest 5 | Where-Object {$_.Source -like "*ftp*" -or $_.Message -like "*ftp*"} | Select-Object TimeGenerated, Message
+
+# Verificar que el XML es valido
 $configPath = "C:\Windows\System32\inetsrv\config\applicationHost.config"
-(Get-Content $configPath -Raw) -replace 'mode="IsolateRootDirectoryOnly"', 'mode="None"' | Set-Content $configPath
-
-# Quitar acceso de diego a las carpetas que NO debe ver
-icacls "C:\FTP\_recursadores" /deny "diego:(OI)(CI)RX"
-icacls "C:\FTP\_usuarios" /deny "diego:(OI)(CI)RX"
-icacls "C:\FTP\LocalUser" /deny "diego:(OI)(CI)RX"
-
-# Quitar acceso de IUSR (anonymous) a todo excepto _general
-icacls "C:\FTP\_recursadores" /deny "IUSR:(OI)(CI)RX"
-icacls "C:\FTP\_reprobados" /deny "IUSR:(OI)(CI)RX"
-icacls "C:\FTP\_usuarios" /deny "IUSR:(OI)(CI)RX"
-icacls "C:\FTP\LocalUser" /deny "IUSR:(OI)(CI)RX"
-
-Restart-Service FTPSVC -Force
+try {
+    [xml](Get-Content $configPath) | Out-Null
+    Write-Host "XML valido" -ForegroundColor Green
+} catch {
+    Write-Host "XML CORRUPTO: $_" -ForegroundColor Red
+}
