@@ -9,13 +9,22 @@ Remove-WebSite -Name "FTP-Servidor" -ErrorAction SilentlyContinue
 
 # 3. Verificar que se eliminó
 Write-Host "`n=== VERIFICAR QUE YA NO APAREZCA ===" -ForegroundColor Yellow
-Get-WebSite | Where-Object Name -eq "FTP-Servidor"
-if ($?) { Write-Host "El sitio aún existe, continuamos..." } else { Write-Host "Sitio eliminado correctamente" }
+$sitio = Get-WebSite | Where-Object Name -eq "FTP-Servidor"
+if ($sitio) { 
+    Write-Host "El sitio aún existe, continuamos..." -ForegroundColor Red
+} else { 
+    Write-Host "Sitio eliminado correctamente" -ForegroundColor Green
+}
 
 # 4. CREAR EL SITIO FTP NUEVO
 Write-Host "`n=== CREANDO SITIO FTP NUEVO ===" -ForegroundColor Green
-New-WebFtpSite -Name "FTP-Servidor" -Port 22 -PhysicalPath "C:\FTP" -ErrorAction Stop
-Write-Host "Sitio creado correctamente" -ForegroundColor Green
+try {
+    New-WebFtpSite -Name "FTP-Servidor" -Port 22 -PhysicalPath "C:\FTP" -ErrorAction Stop
+    Write-Host "Sitio creado correctamente" -ForegroundColor Green
+} catch {
+    Write-Host "Error al crear el sitio: $_" -ForegroundColor Red
+    exit 1
+}
 
 # 5. CONFIGURAR AUTENTICACIÓN
 Write-Host "`n=== CONFIGURANDO AUTENTICACIÓN ===" -ForegroundColor Cyan
