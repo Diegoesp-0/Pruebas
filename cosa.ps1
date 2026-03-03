@@ -1,14 +1,12 @@
-# Ver que hay exactamente dentro de LocalUser\diego
-dir C:\FTP\LocalUser\diego\
-
-# Y ver los atributos (para confirmar que los junctions estan bien)
-cmd /c "dir /AL C:\FTP\LocalUser\diego\"
-
 $usuario = "diego"
 
-# Dar permiso al usuario en la raiz C:\FTP (IIS lo necesita para navegar)
-icacls "C:\FTP" /grant "${usuario}:(RX)" 
+# Este es el permiso critico que falta - el usuario debe ser dueno de su propia raiz
+icacls "C:\FTP\LocalUser\$usuario" /setowner $usuario /T
+icacls "C:\FTP\LocalUser\$usuario" /grant "${usuario}:(OI)(CI)F" /T
+
+# Tambien en la raiz superior
+icacls "C:\FTP" /grant "${usuario}:(RX)"
 icacls "C:\FTP\LocalUser" /grant "${usuario}:(RX)"
-icacls "C:\FTP\LocalUser\$usuario" /grant "${usuario}:(OI)(CI)RX" /T
 
 Restart-Service FTPSVC -Force
+Start-WebSite -Name "FTP-Servidor"
