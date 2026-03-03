@@ -1,123 +1,79 @@
-param(
-    [switch]$i
+# ==============================
+# INSTALAR IIS + FTP
+# ==============================
+
+Write-Host "Instalando IIS y servicio FTP..."
+
+Install-WindowsFeature -Name Web-Server -IncludeManagementTools
+Install-WindowsFeature -Name Web-Ftp-Server
+
+# ==============================
+# CREAR ESTRUCTURA DE CARPETAS
+# ==============================
+
+Write-Host "Creando carpetas..."
+
+New-Item -Path "C:\FTP" -ItemType Directory -Force
+New-Item -Path "C:\FTP\general" -ItemType Directory -Force
+
+# ==============================
+# CREAR USUARIO LOCAL
+# ==============================
+
+Write-Host "Creando usuario local..."
+
+$password = ConvertTo-SecureString "Milaneza12345" -AsPlainText -Force
+New-LocalUser -Name "diego" -Password $password -FullName "Usuario FTP Diego" -Description "Usuario FTP"
+Add-LocalGroupMember -Group "Users" -Member "diego"
+
+# ==============================
+# ASIGNAR PERMISOS A LA CARPETA
+# ==============================
+
+Write-Host "Asignando permisos..."
+
+$acl = Get-Acl "C:\FTP\general"
+$rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+    "diego",
+    "FullControl",
+    "ContainerInherit,ObjectInherit",
+    "None",
+    "Allow"
 )
+$acl.AddAccessRule($rule)
+Set-Acl "C:\FTP\general" $acl
 
-$SITE_NAME = "FTP-SERVER"
-$FTP_ROOT  = "C:\FTP"
-$PORT      = 2121
+# ==============================
+# CONFIGURAR SITIO FTP
+# ==============================
 
-function Test-Admin {
-    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $p  = New-Object Security.Principal.WindowsPrincipal($id)
-    return $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
+Import-Module WebAdministration
 
-if (-not (Test-Admin)) {
-    Write-Host "Ejecuta PowerShell como Administrador"
-    exit
-}
+Write-Host "Creando sitio FTP..."
 
-if ($i) {
+New-WebFtpSite -Name "FTP-Site" -Port 21 -PhysicalPath "C:\FTP\general" -Force
 
-    Write-Host "===== INSTALANDO IIS + FTP ====="
+# Configurar autenticación básica
+Set-ItemProperty "IIS:\Sites\FTP-Site" -Name ftpServer.security.authentication.basicAuthentication.enabled -Value $true
+Set-ItemProperty "IIS:\Sites\FTP-Site" -Name ftpServer.security.authentication.anonymousAuthentication.enabled -Value $false
 
-    # Instalar IIS base
-    Install-WindowsFeature Web-Server -IncludeManagementTools
+# Configurar autorización (control total para diego)
+Add-WebConfiguration `
+  -Filter "/system.ftpServer/security/authorization" `
+  -PSPath "IIS:\" `
+  -Value @{accessType="Allow"; users="diego"; permissions="Read, Write"}
 
-    # Buscar nombre correcto del FTP
-    $ftpFeature = Get-WindowsFeature | Where-Object {
-        $_.Name -like "Web-Ftp*"
-    }
+# ==============================
+# ABRIR PUERTO EN FIREWALL
+# ==============================
 
-    if (-not $ftpFeature) {
-        Write-Host "Tu servidor no tiene disponibles los features FTP."
-        exit
-    }
+Write-Host "Configurando Firewall..."
 
-    foreach ($f in $ftpFeature) {
-        if (-not $f.Installed) {
-            Install-WindowsFeature $f.Name -IncludeManagementTools
-        }
-    }
+New-NetFirewallRule -DisplayName "FTP Port 21" -Direction Inbound -Protocol TCP -LocalPort 21 -Action Allow
 
-    Import-Module WebAdministration
-
-    # Crear carpeta si no existe
-    if (-not (Test-Path $FTP_ROOT)) {
-        New-Item -Path $FTP_ROOT -ItemType Directory
-    }
-
-    # Permisos básicos seguros
-    icacls $FTP_ROOT /grant "Administrators:(OI)(CI)F" /T
-    icacls $FTP_ROOT /grant "SYSTEM:(OI)(CI)F" /T
-    icacls $FTP_ROOT /grant "IIS_IUSRS:(OI)(CI)M" /T
-
-    # Eliminar sitio previo si existe
-    if (Get-WebSite -Name $SITE_NAME -ErrorAction SilentlyContinue) {
-        Stop-WebSite -Name $SITE_NAME -ErrorAction SilentlyContinue
-        Remove-WebSite -Name $SITE_NAME
-    }
-
-    # Crear sitio FTP
-    New-WebFtpSite -Name $SITE_NAME `
-                   -Port $PORT `
-                   -PhysicalPath $FTP_ROOT `
-                   -Force
-
-    Start-Sleep 2
-
-    # Verificar que exista antes de configurar
-    if (-not (Get-WebSite -Name $SITE_NAME -ErrorAction SilentlyContinue)) {
-        Write-Host "El sitio no se creó correctamente."
-        exit
-    }
-
-    # Configurar autenticación
-    Set-WebConfigurationProperty `
-        -Filter "/system.ftpServer/security/authentication/anonymousAuthentication" `
-        -PSPath IIS:\ `
-        -Location $SITE_NAME `
-        -Name enabled `
-        -Value true
-
-    Set-WebConfigurationProperty `
-        -Filter "/system.ftpServer/security/authentication/basicAuthentication" `
-        -PSPath IIS:\ `
-        -Location $SITE_NAME `
-        -Name enabled `
-        -Value true
-
-    # Regla autorización
-    Clear-WebConfiguration `
-        -Filter "/system.ftpServer/security/authorization" `
-        -PSPath IIS:\ `
-        -Location $SITE_NAME `
-        -ErrorAction SilentlyContinue
-
-    Add-WebConfiguration `
-        -Filter "/system.ftpServer/security/authorization" `
-        -PSPath IIS:\ `
-        -Location $SITE_NAME `
-        -Value @{accessType="Allow";users="*";permissions="Read,Write"}
-
-    # Firewall
-    if (-not (Get-NetFirewallRule -DisplayName "FTP 2121" -ErrorAction SilentlyContinue)) {
-        New-NetFirewallRule `
-            -DisplayName "FTP 2121" `
-            -Direction Inbound `
-            -Protocol TCP `
-            -LocalPort $PORT `
-            -Action Allow
-    }
-
-    # Servicio
-    Set-Service FTPSVC -StartupType Automatic
-    Restart-Service FTPSVC
-
-    Start-WebSite -Name $SITE_NAME
-
-    Write-Host ""
-    Write-Host "================================="
-    Write-Host "FTP FUNCIONANDO EN PUERTO $PORT"
-    Write-Host "================================="
-}
+Write-Host "==================================="
+Write-Host "Servidor FTP configurado correctamente."
+Write-Host "Usuario: diego"
+Write-Host "Password: Milaneza12345"
+Write-Host "Carpeta: C:\FTP\general"
+Write-Host "==================================="
