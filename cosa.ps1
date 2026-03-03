@@ -1,20 +1,3 @@
-Import-Module WebAdministration
-
-# Ver el valor actual
-Get-WebConfigurationProperty -PSPath "IIS:\" -Location "FTP-Servidor" -Filter "system.ftpServer/security/authentication" -Name "."
-
-# Forma alternativa de establecer el aislamiento
-$sitio = "FTP-Servidor"
-Set-WebConfigurationProperty `
-    -PSPath "IIS:\" `
-    -Location $sitio `
-    -Filter "system.ftpServer/userIsolation" `
-    -Name "mode" `
-    -Value "IsolateUsers"
-
-# Verificar
-Get-WebConfigurationProperty `
-    -PSPath "IIS:\" `
-    -Location $sitio `
-    -Filter "system.ftpServer/userIsolation" `
-    -Name "mode"
+# Ver como esta el sitio en el config real
+$config = [xml](Get-Content "C:\Windows\System32\inetsrv\config\applicationHost.config")
+$config.configuration.'system.applicationHost'.sites.site | Where-Object { $_.name -eq "FTP-Servidor" } | Select-Object -ExpandProperty ftpServer
