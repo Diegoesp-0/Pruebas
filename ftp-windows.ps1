@@ -27,25 +27,22 @@ function Cargar-WebAdmin {
 }
 
 # ============================================================
-# FUNCION AUXILIAR: Ejecutar icacls de forma segura
+# FUNCION AUXILIAR: Ejecutar icacls de forma segura via Start-Process
 #
-# Usamos Start-Process icacls con -ArgumentList para que PowerShell
-# nunca intente parsear los argumentos como variables o rutas.
-# Esto evita el error InvalidVariableReferenceWithDrive que ocurre
-# cuando PowerShell ve "NETWORK SERVICE:" y lo interpreta como unidad.
+# IMPORTANTE: El parametro se llama $argumentos y NO $args porque
+# $args es una variable automatica reservada de PowerShell y al
+# usarla como parametro su valor llega NULL, causando el error
+# ParameterArgumentValidationError en Start-Process.
 # ============================================================
 function Icacls-Seguro {
-    param([string[]]$args)
-    $p = Start-Process -FilePath "icacls.exe" `
-                       -ArgumentList $args `
-                       -Wait -NoNewWindow `
-                       -PassThru
+    param([string[]]$argumentos)
+    Start-Process -FilePath "icacls.exe" `
+                  -ArgumentList $argumentos `
+                  -Wait -NoNewWindow | Out-Null
 }
 
-# Permisos base que IIS necesita para operar en cualquier carpeta FTP
 function Dar-Permisos-IIS {
     param([string]$ruta)
-
     Icacls-Seguro @($ruta, "/grant", "SYSTEM:(OI)(CI)F")
     Icacls-Seguro @($ruta, "/grant", "Administrators:(OI)(CI)F")
     Icacls-Seguro @($ruta, "/grant", "NETWORK SERVICE:(OI)(CI)RX")
@@ -54,7 +51,6 @@ function Dar-Permisos-IIS {
 
 function Dar-Permisos-IIS-Recursivo {
     param([string]$ruta)
-
     Icacls-Seguro @($ruta, "/grant", "SYSTEM:(OI)(CI)F", "/T")
     Icacls-Seguro @($ruta, "/grant", "Administrators:(OI)(CI)F", "/T")
     Icacls-Seguro @($ruta, "/grant", "NETWORK SERVICE:(OI)(CI)RX", "/T")
@@ -105,9 +101,9 @@ function Crear-RaizUsuario {
     if (-not (Test-Path $dirPersonal)) { New-Item -Path $dirPersonal -ItemType Directory -Force | Out-Null }
 
     # ---- Junctions ----
-    if (-not (Test-Path "$raiz\general"))  { cmd /c "mklink /J `"$raiz\general`" `"$rutaGeneral`"" | Out-Null }
-    if (-not (Test-Path "$raiz\$grupo"))   { cmd /c "mklink /J `"$raiz\$grupo`" `"$rutaGrupo`""   | Out-Null }
-    if (-not (Test-Path "$raiz\$usuario")) { cmd /c "mklink /J `"$raiz\$usuario`" `"$dirPersonal`"" | Out-Null }
+    if (-not (Test-Path "$raiz\general"))  { cmd /c "mklink /J `"$raiz\general`" `"$rutaGeneral`""   | Out-Null }
+    if (-not (Test-Path "$raiz\$grupo"))   { cmd /c "mklink /J `"$raiz\$grupo`" `"$rutaGrupo`""      | Out-Null }
+    if (-not (Test-Path "$raiz\$usuario")) { cmd /c "mklink /J `"$raiz\$usuario`" `"$dirPersonal`""  | Out-Null }
 
     # ---- Permisos raiz de aislamiento ----
     Dar-Permisos-IIS    -ruta $raiz
@@ -139,7 +135,7 @@ function Obtener-GrupoActual {
     $aclR = (icacls "$FTP_ROOT\_reprobados"   2>&1) -join " "
     $aclE = (icacls "$FTP_ROOT\_recursadores" 2>&1) -join " "
 
-    if ($aclR -match "${usuario}.*M\)") { return "reprobados" }
+    if ($aclR -match "${usuario}.*M\)")    { return "reprobados" }
     elseif ($aclE -match "${usuario}.*M\)") { return "recursadores" }
     return ""
 }
@@ -214,26 +210,21 @@ if ($i) {
     # ---------- 5. Permisos NTFS base ----------
     Print-Info "Configurando permisos NTFS base..."
 
-    # Raiz completa recursivo
     Dar-Permisos-IIS-Recursivo -ruta $FTP_ROOT
     Print-Completado "Permisos IIS base aplicados en $FTP_ROOT"
 
-    # _reprobados: bloquear anonymous
     Bloquear-Anonymous -ruta "$FTP_ROOT\_reprobados"
     Dar-Permisos-IIS   -ruta "$FTP_ROOT\_reprobados"
     Print-Completado "_reprobados: anonymous bloqueado."
 
-    # _recursadores: bloquear anonymous
     Bloquear-Anonymous -ruta "$FTP_ROOT\_recursadores"
     Dar-Permisos-IIS   -ruta "$FTP_ROOT\_recursadores"
     Print-Completado "_recursadores: anonymous bloqueado."
 
-    # _usuarios: bloquear anonymous
     Bloquear-Anonymous -ruta "$FTP_ROOT\_usuarios"
     Dar-Permisos-IIS   -ruta "$FTP_ROOT\_usuarios"
     Print-Completado "_usuarios: anonymous bloqueado."
 
-    # _general: anonymous puede leer
     Dar-Permisos-IIS -ruta "$FTP_ROOT\_general"
     Dar-Permiso-IUSR -ruta "$FTP_ROOT\_general"
     Print-Completado "_general: anonymous con RX."
