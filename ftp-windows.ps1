@@ -32,7 +32,7 @@ function Print-Info   { param($msg) Write-Host "[INFO]  $msg" -ForegroundColor C
 function Print-Ok     { param($msg) Write-Host "[OK]    $msg" -ForegroundColor Green }
 function Print-Error  { param($msg) Write-Host "[ERROR] $msg" -ForegroundColor Red }
 function Print-Warn   { param($msg) Write-Host "[WARN]  $msg" -ForegroundColor Yellow }
-function Print-Titulo { param($msg) Write-Host "`n=== $msg ===`n" -ForegroundColor Yellow }
+function Print-Titulo { param($msg) Write-Host "`n=== $msg ===`n" -ForegroundColor Magenta }
 
 # ============================================================================
 # Variables Globales
@@ -73,50 +73,6 @@ function New-ACLRule {
     return New-Object System.Security.AccessControl.FileSystemAccessRule(
         $Identity, $Rights,
         "ContainerInherit,ObjectInherit", "None", $Type
-    )
-}
-
-# ============================================================================
-# FUNCION: Crear regla ACL SIN permiso Delete (para carpetas compartidas)
-# Permite crear/modificar contenido pero NO borrar la carpeta raíz
-# ============================================================================
-function New-ACLRule-NoDelete {
-    param(
-        [object]$Identity,
-        [string]$Type = "Allow"
-    )
-    
-    # Permisos específicos SIN Delete
-    $permissions = [System.Security.AccessControl.FileSystemRights]::ReadAndExecute -bor
-                   [System.Security.AccessControl.FileSystemRights]::Write -bor
-                   [System.Security.AccessControl.FileSystemRights]::CreateFiles -bor
-                   [System.Security.AccessControl.FileSystemRights]::CreateDirectories -bor
-                   [System.Security.AccessControl.FileSystemRights]::WriteAttributes -bor
-                   [System.Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
-                   [System.Security.AccessControl.FileSystemRights]::ReadAttributes -bor
-                   [System.Security.AccessControl.FileSystemRights]::ReadExtendedAttributes
-    
-    return New-Object System.Security.AccessControl.FileSystemAccessRule(
-        $Identity, 
-        $permissions,
-        "ContainerInherit,ObjectInherit", 
-        "None", 
-        $Type
-    )
-}
-
-# ============================================================================
-# FUNCION: Crear regla Deny para Delete (evita que se borre la carpeta raíz)
-# ============================================================================
-function New-ACLRule-DenyDelete {
-    param([object]$Identity)
-    
-    return New-Object System.Security.AccessControl.FileSystemAccessRule(
-        $Identity, 
-        [System.Security.AccessControl.FileSystemRights]::Delete,
-        "None",  # No heredar - solo esta carpeta
-        "None", 
-        "Deny"
     )
 }
 
@@ -232,16 +188,6 @@ function Crear-Grupos {
     }
 }
 
-# ============================================================================
-# FUNCION: Crear estructura de directorios base
-#
-# C:\ftp\
-# └── LocalUser\
-#     ├── Public\          <- home del anonimo
-#     │   └── general\     <- carpeta publica compartida
-#     ├── reprobados\      <- carpeta compartida del grupo
-#     └── recursadores\    <- carpeta compartida del grupo
-# ============================================================================
 function Crear-Estructura-Base {
     Print-Info "Creando estructura de directorios..."
 
@@ -278,32 +224,28 @@ function Crear-Estructura-Base {
         (New-ACLRule $ID_IUSR   "ReadAndExecute")
     )
 
-    # --- Permisos general: autenticados escriben pero NO pueden borrar la carpeta
+    # --- Permisos general: autenticados escriben, IUSR solo lee
     Set-FolderACL -Path "$FTP_ROOT\LocalUser\Public\general" -Rules @(
         (New-ACLRule $ID_ADMINS "FullControl"),
         (New-ACLRule $ID_SYSTEM "FullControl"),
         (New-ACLRule $ID_AUTH   "Modify"),
-        (New-ACLRule-DenyDelete $ID_AUTH),
         (New-ACLRule $ID_IUSR   "ReadAndExecute")
     )
-    Print-Ok "Permisos 'general' configurados (usuarios NO pueden borrar la carpeta)."
+    Print-Ok "Permisos 'general' configurados."
 
-    # --- Permisos carpetas de grupo: grupo puede escribir pero NO borrar la carpeta
+    # --- Permisos carpetas de grupo: IUSR sin acceso, solo el grupo respectivo
     foreach ($grupo in @($GRUPO_REPROBADOS, $GRUPO_RECURSADORES)) {
-        # Obtener identidad del grupo para Deny
-        $grupoIdentity = New-Object System.Security.Principal.NTAccount($grupo)
-        
         Set-FolderACL -Path "$FTP_ROOT\LocalUser\$grupo" -Rules @(
             (New-ACLRule $ID_ADMINS "FullControl"),
             (New-ACLRule $ID_SYSTEM "FullControl"),
-            (New-ACLRule $grupo     "Modify"),
-            (New-ACLRule-DenyDelete $grupoIdentity)
+            (New-ACLRule $grupo     "Modify")
             # IUSR no tiene regla aqui: sin acceso a carpetas de grupo
         )
-        Print-Ok "Permisos '$grupo' configurados (grupo NO puede borrar la carpeta)."
+        Print-Ok "Permisos '$grupo' configurados (anonimo sin acceso)."
     }
 
     Print-Ok "Estructura base lista."
+    Proteger-CarpetasBase
 }
 
 # ============================================================================
@@ -399,19 +341,6 @@ function Configurar-FTP {
     Print-Ok "Estado del sitio: $estado"
 }
 
-# ============================================================================
-# FUNCION: Construir jaula del usuario con junctions del sistema de archivos
-#
-# Estructura visible al usuario al conectarse:
-#   /                    <- C:\ftp\LocalUser\<usuario>\
-#   ├── general\         <- junction -> C:\ftp\LocalUser\Public\general
-#   ├── reprobados\      <- junction -> C:\ftp\LocalUser\reprobados
-#   │   (o recursadores)
-#   └── <usuario>\       <- carpeta personal fisica
-#
-# NOTA: Se usan junctions (mklink /J) porque IIS FTP User Isolation
-# NO muestra Virtual Directories en el listado de directorios.
-# ============================================================================
 function Construir-Jaula-Usuario {
     param(
         [string]$usuario,
@@ -441,17 +370,16 @@ function Construir-Jaula-Usuario {
     Set-FolderACL -Path $jaula -Rules @(
         (New-ACLRule $ID_ADMINS   "FullControl"),
         (New-ACLRule $ID_SYSTEM   "FullControl"),
-        (New-ACLRule $userAccount "ReadAndExecute")
+        (New-ACLRule $userAccount "Modify")
     )
 
-    # Permisos carpeta personal (usuario NO puede borrar su propia carpeta raíz)
+    # Permisos carpeta personal
     Set-FolderACL -Path $personal -Rules @(
         (New-ACLRule $ID_ADMINS   "FullControl"),
         (New-ACLRule $ID_SYSTEM   "FullControl"),
-        (New-ACLRule $userAccount "Modify"),
-        (New-ACLRule-DenyDelete $userAccount)
+        (New-ACLRule $userAccount "Modify")
     )
-    Print-Ok "  Carpeta personal: $personal (usuario NO puede borrarla)"
+    Print-Ok "  Carpeta personal: $personal"
 
     # Junction: general -> C:\ftp\LocalUser\Public\general (compartida todos)
     $jGeneral = "$jaula\general"
@@ -722,7 +650,7 @@ function Gestionar-Usuarios {
                 do { $usuario = (Read-Host "Nombre de usuario").Trim() } `
                     while (-not (Validar-Usuario -usuario $usuario))
 
-                do { $password = (Read-Host "Contrasena (Que tenga al menos 8 caracteres, una mayuscula, un numero y un caracter especial)").Trim() } `
+                do { $password = (Read-Host "Contrasena").Trim() } `
                     while ([string]::IsNullOrWhiteSpace($password))
 
                 Write-Host "  1) $GRUPO_REPROBADOS"
@@ -838,6 +766,32 @@ function Ver-Estado {
 }
 
 # ============================================================================
+# FUNCION: Proteger carpetas base contra eliminacion accidental
+# ============================================================================
+function Proteger-CarpetasBase {
+    $carpetas = @(
+        "$FTP_ROOT\LocalUser\Public\general",
+        "$FTP_ROOT\LocalUser\reprobados",
+        "$FTP_ROOT\LocalUser\recursadores"
+    )
+
+    foreach ($carpeta in $carpetas) {
+        if (Test-Path $carpeta) {
+            # Denegar explicitamente "Delete" y "DeleteSubdirectoriesAndFiles" a todos
+            $acl = Get-Acl $carpeta
+            $denyAll = New-Object System.Security.Principal.SecurityIdentifier("S-1-1-0") # Everyone
+            $denyRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+                $denyAll, "Delete,DeleteSubdirectoriesAndFiles",
+                "None", "None", "Deny"
+            )
+            $acl.AddAccessRule($denyRule)
+            Set-Acl -Path $carpeta -AclObject $acl
+            Print-Ok "Carpeta protegida contra eliminacion: $carpeta"
+        }
+    }
+}
+
+# ============================================================================
 # FUNCION: Reiniciar FTP
 # ============================================================================
 function Reiniciar-FTP {
@@ -854,8 +808,9 @@ function Reiniciar-FTP {
 # FUNCION: Mostrar ayuda
 # ============================================================================
 function Mostrar-Ayuda {
+    Clear-Host
     Write-Host ""
-    Write-Host "Uso: .\ftp_server.ps1 [opcion]" -ForegroundColor Cyan
+    Write-Host "Selecciona una opcion" -ForegroundColor Magenta
     Write-Host ""
     Write-Host "  -install   Instala y configura el servidor FTP (primera vez)"
     Write-Host "  -users     Gestionar usuarios (crear, cambiar grupo, eliminar)"
@@ -864,10 +819,6 @@ function Mostrar-Ayuda {
     Write-Host "  -verify    Verificar si IIS y FTP estan instalados"
     Write-Host "  -list      Listar usuarios y estructura"
     Write-Host "  -help      Mostrar esta ayuda"
-    Write-Host ""
-    Write-Host "Orden recomendado (primera vez):" -ForegroundColor Yellow
-    Write-Host "  1. .\ftp_server.ps1 -install"
-    Write-Host "  2. .\ftp_server.ps1 -users"
     Write-Host ""
 }
 
