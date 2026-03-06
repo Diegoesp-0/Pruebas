@@ -1,13 +1,13 @@
+Install-WindowsFeature Web-Ftp-Ext -IncludeManagementTools
+
+# Verificar
 Get-WindowsFeature Web-Ftp-Server, Web-Ftp-Service, Web-Ftp-Ext | 
     Select Name, Installed, InstallState
 
-    sc.exe query ftpsvc
-sc.exe qc ftpsvc
+    Stop-Service ftpsvc -Force
+Start-Sleep -Seconds 3
+Start-Service ftpsvc
+Start-Sleep -Seconds 3
 
-# Ver logs de FTP en el visor de eventos (canal más específico)
-Get-WinEvent -ListLog "*ftp*","*iis*" -ErrorAction SilentlyContinue | 
-    Select LogName, RecordCount
-
-# Intentar leer el canal de IIS
-Get-WinEvent -LogName "Microsoft-IIS-FTPServer/Operational" -MaxEvents 10 `
-    -ErrorAction SilentlyContinue | Format-List TimeCreated, Message
+& "$env:SystemRoot\System32\inetsrv\appcmd.exe" start site "ServidorFTP"
+& "$env:SystemRoot\System32\inetsrv\appcmd.exe" list site "ServidorFTP"
