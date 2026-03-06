@@ -59,7 +59,6 @@ function Protect-FolderFromDeletion {
         $ID_EVERYONE, "Delete", "None", "None", "Deny")
     $acl.AddAccessRule($denyRule)
     Set-Acl -Path $Path -AclObject $acl
-    Print-Ok "Protegida contra borrado: $Path"
 }
 
 function Grant-FTPLogonRight {
@@ -131,11 +130,13 @@ function Crear-Estructura-Base {
         } else { Print-Info "Ya existe: $dir" }
     }
 
+    # Raiz: solo admins/system, los usuarios no deben ver ni navegar aqui directamente
     Set-FolderACL -Path $FTP_ROOT -Rules @(
         (New-ACLRule $ID_ADMINS "FullControl"),
         (New-ACLRule $ID_SYSTEM "FullControl")
     )
 
+    # LocalUser: AUTH e IUSR necesitan ReadAndExecute para que IIS resuelva el home
     Set-FolderACL -Path "$FTP_ROOT\LocalUser" -Rules @(
         (New-ACLRule $ID_ADMINS "FullControl"),
         (New-ACLRule $ID_SYSTEM "FullControl"),
@@ -144,12 +145,14 @@ function Crear-Estructura-Base {
     )
     Print-Ok "Permisos LocalUser configurados."
 
+    # Public: home del anonimo, IUSR puede navegar
     Set-FolderACL -Path "$FTP_ROOT\LocalUser\Public" -Rules @(
         (New-ACLRule $ID_ADMINS "FullControl"),
         (New-ACLRule $ID_SYSTEM "FullControl"),
         (New-ACLRule $ID_IUSR   "ReadAndExecute")
     )
 
+    # general: AUTH escribe, IUSR solo lee. Protegida contra borrado.
     Set-FolderACL -Path "$FTP_ROOT\LocalUser\Public\general" -Rules @(
         (New-ACLRule $ID_ADMINS "FullControl"),
         (New-ACLRule $ID_SYSTEM "FullControl"),
@@ -159,6 +162,7 @@ function Crear-Estructura-Base {
     Protect-FolderFromDeletion "$FTP_ROOT\LocalUser\Public\general"
     Print-Ok "Permisos 'general' configurados."
 
+    # reprobados: solo su grupo. Protegida contra borrado.
     Set-FolderACL -Path "$FTP_ROOT\LocalUser\$GRUPO_REPROBADOS" -Rules @(
         (New-ACLRule $ID_ADMINS        "FullControl"),
         (New-ACLRule $ID_SYSTEM        "FullControl"),
@@ -167,6 +171,7 @@ function Crear-Estructura-Base {
     Protect-FolderFromDeletion "$FTP_ROOT\LocalUser\$GRUPO_REPROBADOS"
     Print-Ok "Permisos '$GRUPO_REPROBADOS' configurados."
 
+    # recursadores: solo su grupo. Protegida contra borrado.
     Set-FolderACL -Path "$FTP_ROOT\LocalUser\$GRUPO_RECURSADORES" -Rules @(
         (New-ACLRule $ID_ADMINS          "FullControl"),
         (New-ACLRule $ID_SYSTEM          "FullControl"),
@@ -202,6 +207,8 @@ function Configurar-FTP {
     New-WebFtpSite -Name $FTP_SITE_NAME -Port $FTP_PORT -PhysicalPath $FTP_ROOT -Force | Out-Null
     Print-Ok "Sitio '$FTP_SITE_NAME' creado."
 
+    # Modo 3: cada usuario enjaulado en LocalUser\<usuario>
+    # El anonimo va a LocalUser\Public
     Set-ItemProperty "IIS:\Sites\$FTP_SITE_NAME" -Name "ftpServer.userIsolation.mode" -Value 3
     Print-Ok "User Isolation: modo 3 (IsolateAllDirectories)."
 
@@ -268,10 +275,10 @@ function Configurar-Firewall {
 
 function Validar-Usuario {
     param([string]$usuario)
-    if ([string]::IsNullOrEmpty($usuario))                              { Print-Error "El nombre no puede estar vacio.";                return $false }
-    if ($usuario.Length -lt 3 -or $usuario.Length -gt 20)              { Print-Error "El nombre debe tener entre 3 y 20 caracteres.";  return $false }
-    if ($usuario -notmatch '^[a-zA-Z][a-zA-Z0-9_-]*$')                 { Print-Error "Solo letras, numeros, guion y guion bajo.";      return $false }
-    if (Get-LocalUser -Name $usuario -ErrorAction SilentlyContinue)    { Print-Error "El usuario '$usuario' ya existe.";               return $false }
+    if ([string]::IsNullOrEmpty($usuario))                           { Print-Error "El nombre no puede estar vacio.";               return $false }
+    if ($usuario.Length -lt 3 -or $usuario.Length -gt 20)           { Print-Error "Debe tener entre 3 y 20 caracteres.";           return $false }
+    if ($usuario -notmatch '^[a-zA-Z][a-zA-Z0-9_-]*$')              { Print-Error "Solo letras, numeros, guion y guion bajo.";     return $false }
+    if (Get-LocalUser -Name $usuario -ErrorAction SilentlyContinue) { Print-Error "El usuario '$usuario' ya existe.";             return $false }
     return $true
 }
 
@@ -289,12 +296,18 @@ function Construir-Jaula-Usuario {
     $userSID     = (Get-LocalUser -Name $usuario).SID
     $userAccount = $userSID.Translate([System.Security.Principal.NTAccount])
 
+    # La jaula raiz necesita Modify para que IIS FTP pueda establecer el home directory.
+    # Sin este permiso IIS retorna 530 "home directory inaccessible".
+    # El usuario NO puede borrar la jaula porque Protect-FolderFromDeletion
+    # agrega DENY Delete sobre este objeto.
     Set-FolderACL -Path $jaula -Rules @(
         (New-ACLRule $ID_ADMINS   "FullControl"),
         (New-ACLRule $ID_SYSTEM   "FullControl"),
-        (New-ACLRule $userAccount "ReadAndExecute")
+        (New-ACLRule $userAccount "Modify")
     )
+    Protect-FolderFromDeletion $jaula
 
+    # Carpeta personal: Modify + protegida contra borrado
     Set-FolderACL -Path $personal -Rules @(
         (New-ACLRule $ID_ADMINS   "FullControl"),
         (New-ACLRule $ID_SYSTEM   "FullControl"),
@@ -303,12 +316,14 @@ function Construir-Jaula-Usuario {
     Protect-FolderFromDeletion $personal
     Print-Ok "  Carpeta personal: $personal"
 
+    # Junction general -> C:\ftp\LocalUser\Public\general
     $jGeneral = "$jaula\general"
     if (-not (Test-Path $jGeneral)) {
         cmd /c "mklink /J `"$jGeneral`" `"$FTP_ROOT\LocalUser\Public\general`"" | Out-Null
         Print-Ok "  Junction 'general' creado."
     } else { Print-Info "  Junction 'general' ya existe." }
 
+    # Junction grupo -> C:\ftp\LocalUser\<grupo>
     $jGrupo = "$jaula\$grupo"
     if (-not (Test-Path $jGrupo)) {
         cmd /c "mklink /J `"$jGrupo`" `"$FTP_ROOT\LocalUser\$grupo`"" | Out-Null
@@ -322,15 +337,25 @@ function Destruir-Jaula-Usuario {
     param([string]$usuario)
     Print-Info "Eliminando jaula de '$usuario'..."
     $jaula = "$FTP_ROOT\LocalUser\$usuario"
+
     foreach ($junc in @("general", $GRUPO_REPROBADOS, $GRUPO_RECURSADORES)) {
         $juncPath = "$jaula\$junc"
-        if (Test-Path $juncPath) { cmd /c "rmdir `"$juncPath`"" | Out-Null; Print-Ok "  Junction '$junc' eliminado." }
+        if (Test-Path $juncPath) {
+            cmd /c "rmdir `"$juncPath`"" | Out-Null
+            Print-Ok "  Junction '$junc' eliminado."
+        }
     }
+
     if (Test-Path $jaula) {
-        $carpetaPersonal = "$jaula\$usuario"
-        if (Test-Path $carpetaPersonal) {
-            $acl = Get-Acl $carpetaPersonal -ErrorAction SilentlyContinue
-            if ($acl) { $acl.SetAccessRuleProtection($false, $true); Set-Acl -Path $carpetaPersonal -AclObject $acl -ErrorAction SilentlyContinue }
+        # Quitar DENY para poder borrar
+        foreach ($sub in @($jaula, "$jaula\$usuario")) {
+            if (Test-Path $sub) {
+                $acl = Get-Acl $sub -ErrorAction SilentlyContinue
+                if ($acl) {
+                    $acl.SetAccessRuleProtection($false, $true)
+                    Set-Acl -Path $sub -AclObject $acl -ErrorAction SilentlyContinue
+                }
+            }
         }
         Remove-Item -Path $jaula -Recurse -Force -ErrorAction SilentlyContinue
         Print-Ok "  Carpeta home eliminada."
@@ -413,7 +438,10 @@ function Cambiar-Grupo-Usuario {
     $jaula = "$FTP_ROOT\LocalUser\$usuario"
     if ($grupoActual) {
         $juncViejo = "$jaula\$grupoActual"
-        if (Test-Path $juncViejo) { cmd /c "rmdir `"$juncViejo`"" | Out-Null; Print-Ok "Junction '$grupoActual' eliminado." }
+        if (Test-Path $juncViejo) {
+            cmd /c "rmdir `"$juncViejo`"" | Out-Null
+            Print-Ok "Junction '$grupoActual' eliminado."
+        }
     }
     $juncNuevo = "$jaula\$nuevoGrupo"
     if (-not (Test-Path $juncNuevo)) {
