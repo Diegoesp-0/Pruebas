@@ -1,27 +1,50 @@
-Get-EventLog -LogName Application -Newest 20 | 
-    Where-Object { $_.Message -match "ftp|iis|ftpsvc" -or $_.Source -match "ftp|iis" } | 
-    Format-List TimeGenerated, Source, EntryType, Message
+$configFile = "$env:SystemRoot\System32\inetsrv\config\applicationHost.config"
+[xml]$xml = Get-Content $configFile
+$xml.configuration.'system.applicationHost'.sites.site | 
+    Where-Object { $_.name -eq "ServidorFTP" } | 
+    Select-Object -ExpandProperty OuterXml
 
-    # Ver si existe el log de FTP
-$logPath = "$env:SystemRoot\System32\LogFiles\FTPSVC2"
-if (Test-Path $logPath) {
-    Get-ChildItem $logPath | Sort-Object LastWriteTime -Descending | Select-Object -First 3
-    Get-Content (Get-ChildItem $logPath | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName) -Tail 30
-} else {
-    Write-Host "No existe $logPath, buscando..."
-    Get-ChildItem "$env:SystemRoot\System32\LogFiles" -Recurse -Filter "*.log" | 
-        Sort-Object LastWriteTime -Descending | Select-Object -First 5
-}
 
-# Ver TODOS los sitios IIS
-& "$env:SystemRoot\System32\inetsrv\appcmd.exe" list site
+Import-Module WebAdministration
 
-# Ver qué proceso usa el puerto 21
-netstat -ano | Select-String ":21 "
-$pid21 = (netstat -ano | Select-String ":21\s" | Select-Object -First 1) -replace ".*\s(\d+)$",'$1'
-if ($pid21) { Get-Process -Id $pid21.Trim() -ErrorAction SilentlyContinue }
+# Eliminar sitio corrupto
+& "$env:SystemRoot\System32\inetsrv\appcmd.exe" delete site "ServidorFTP"
 
-# Ver eventos de TODOS los sources en los ultimos 5 minutos
-$desde = (Get-Date).AddMinutes(-5)
-Get-EventLog -LogName System -After $desde | Format-List TimeGenerated, Source, EntryType, Message
-Get-EventLog -LogName Application -After $desde | Format-List TimeGenerated, Source, EntryType, Message
+# Recrear limpio sin doble configuracion SSL
+New-WebFtpSite -Name "ServidorFTP" -Port 21 -PhysicalPath "C:\ftp" -Force
+
+# Isolation
+Set-ItemProperty "IIS:\Sites\ServidorFTP" -Name "ftpServer.userIsolation.mode" -Value 3
+
+# Autenticacion
+Set-ItemProperty "IIS:\Sites\ServidorFTP" `
+    -Name "ftpServer.security.authentication.basicAuthentication.enabled" -Value $true
+Set-ItemProperty "IIS:\Sites\ServidorFTP" `
+    -Name "ftpServer.security.authentication.anonymousAuthentication.enabled" -Value $true
+
+# SSL - solo UNA vez, con SslAllow
+Set-ItemProperty "IIS:\Sites\ServidorFTP" `
+    -Name "ftpServer.security.ssl.controlChannelPolicy" -Value "SslAllow"
+Set-ItemProperty "IIS:\Sites\ServidorFTP" `
+    -Name "ftpServer.security.ssl.dataChannelPolicy" -Value "SslAllow"
+
+# Autorizacion
+Clear-WebConfiguration "/system.ftpServer/security/authorization" `
+    -PSPath "IIS:\" -Location "ServidorFTP" -ErrorAction SilentlyContinue
+
+Add-WebConfiguration "/system.ftpServer/security/authorization" `
+    -PSPath "IIS:\" -Location "ServidorFTP" `
+    -Value @{ accessType="Allow"; users="?"; roles=""; permissions=1 }
+
+Add-WebConfiguration "/system.ftpServer/security/authorization" `
+    -PSPath "IIS:\" -Location "ServidorFTP" `
+    -Value @{ accessType="Allow"; users="*"; roles=""; permissions=3 }
+
+# Reiniciar y arrancar
+Stop-Service ftpsvc -Force
+Start-Sleep -Seconds 3
+Start-Service ftpsvc
+Start-Sleep -Seconds 3
+
+& "$env:SystemRoot\System32\inetsrv\appcmd.exe" start site "ServidorFTP"
+& "$env:SystemRoot\System32\inetsrv\appcmd.exe" list site "ServidorFTP"
