@@ -1,7 +1,20 @@
-Test-Path "C:\ftp\LocalUser\usuario1"
-Get-ChildItem "C:\ftp\LocalUser\usuario1"
-Get-Acl "C:\ftp\LocalUser\usuario1" | Select -ExpandProperty Access | Format-Table
+$path = "C:\ftp\LocalUser"
+$acl = Get-Acl $path
 
-Get-Acl "C:\ftp\LocalUser" | Select -ExpandProperty Access | Format-Table IdentityReference, FileSystemRights, AccessControlType
+$authUsers = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-11")
+$authAccount = $authUsers.Translate([System.Security.Principal.NTAccount])
 
-Get-Acl "C:\ftp\LocalUser" | Select -ExpandProperty Access | Format-Table IdentityReference, FileSystemRights, AccessControlType
+$rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+    $authAccount,
+    "ReadAndExecute",
+    "ContainerInherit,ObjectInherit",
+    "None",
+    "Allow"
+)
+
+$acl.AddAccessRule($rule)
+Set-Acl -Path $path -AclObject $acl
+
+# Verificar
+Get-Acl "C:\ftp\LocalUser" | Select -ExpandProperty Access | 
+    Format-Table IdentityReference, FileSystemRights, AccessControlType
