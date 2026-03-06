@@ -1,10 +1,18 @@
+# ============================================================================
+# Script de Automatizacion de Servidor FTP - Windows Server 2025
+# Administracion de Sistemas - IIS con FTP Service
+# ============================================================================
+
+# ============================================================================
+# DEBE ESTAR AL INICIO DEL SCRIPT
+# ============================================================================
 param(
-    [Alias("i")][switch]$install,
-    [Alias("u")][switch]$users,
-    [Alias("r")][switch]$restart,
-    [Alias("s")][switch]$status,
-    [Alias("l")][switch]$list,
-    [Alias("v")][switch]$verify,
+    [switch]$verify,
+    [switch]$install,
+    [switch]$users,
+    [switch]$restart,
+    [switch]$status,
+    [switch]$list,
     [switch]$help
 )
 
@@ -18,7 +26,7 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
 }
 
 # ============================================================================
-# Utilidades de color
+# Colores y utilidades
 # ============================================================================
 function Print-Info   { param($msg) Write-Host "[INFO]  $msg" -ForegroundColor Cyan }
 function Print-Ok     { param($msg) Write-Host "[OK]    $msg" -ForegroundColor Green }
@@ -34,24 +42,27 @@ $GRUPO_REPROBADOS   = "reprobados"
 $GRUPO_RECURSADORES = "recursadores"
 $FTP_SITE_NAME      = "ServidorFTP"
 $FTP_PORT           = 21
-$APPCMD             = "$env:SystemRoot\System32\inetsrv\appcmd.exe"
 
 # ============================================================================
-# Resolver identidades por SID (independiente del idioma del SO)
+# IDENTIDADES POR SID - Independiente del idioma del SO
+# S-1-5-32-544 = Administrators / Administradores
+# S-1-5-18     = SYSTEM / SISTEMA
+# S-1-5-11     = Authenticated Users / Usuarios autenticados
+# S-1-5-17     = IUSR (cuenta anonima IIS)
 # ============================================================================
 function Resolve-SID {
     param([string]$Sid)
-    return (New-Object System.Security.Principal.SecurityIdentifier($Sid)).Translate(
-        [System.Security.Principal.NTAccount])
+    $sidObj = New-Object System.Security.Principal.SecurityIdentifier($Sid)
+    return $sidObj.Translate([System.Security.Principal.NTAccount])
 }
 
-$ID_ADMINS = Resolve-SID "S-1-5-32-544"   # Administrators
-$ID_SYSTEM = Resolve-SID "S-1-5-18"       # SYSTEM
-$ID_AUTH   = Resolve-SID "S-1-5-11"       # Authenticated Users
-$ID_IUSR   = Resolve-SID "S-1-5-17"       # IUSR
+$ID_ADMINS = Resolve-SID "S-1-5-32-544"
+$ID_SYSTEM = Resolve-SID "S-1-5-18"
+$ID_AUTH   = Resolve-SID "S-1-5-11"
+$ID_IUSR   = Resolve-SID "S-1-5-17"
 
 # ============================================================================
-# Crear regla ACL
+# FUNCION: Crear regla ACL reutilizable
 # ============================================================================
 function New-ACLRule {
     param(
@@ -60,47 +71,101 @@ function New-ACLRule {
         [string]$Type   = "Allow"
     )
     return New-Object System.Security.AccessControl.FileSystemAccessRule(
-        $Identity, $Rights, "ContainerInherit,ObjectInherit", "None", $Type
+        $Identity, $Rights,
+        "ContainerInherit,ObjectInherit", "None", $Type
     )
 }
 
 # ============================================================================
-# Aplicar ACL limpia (sin herencia, solo las reglas indicadas)
+# FUNCION: Crear regla ACL SIN permiso Delete (para carpetas compartidas)
+# Permite crear/modificar contenido pero NO borrar la carpeta raíz
+# ============================================================================
+function New-ACLRule-NoDelete {
+    param(
+        [object]$Identity,
+        [string]$Type = "Allow"
+    )
+    
+    # Permisos específicos SIN Delete
+    $permissions = [System.Security.AccessControl.FileSystemRights]::ReadAndExecute -bor
+                   [System.Security.AccessControl.FileSystemRights]::Write -bor
+                   [System.Security.AccessControl.FileSystemRights]::CreateFiles -bor
+                   [System.Security.AccessControl.FileSystemRights]::CreateDirectories -bor
+                   [System.Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+                   [System.Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
+                   [System.Security.AccessControl.FileSystemRights]::ReadAttributes -bor
+                   [System.Security.AccessControl.FileSystemRights]::ReadExtendedAttributes
+    
+    return New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $Identity, 
+        $permissions,
+        "ContainerInherit,ObjectInherit", 
+        "None", 
+        $Type
+    )
+}
+
+# ============================================================================
+# FUNCION: Crear regla Deny para Delete (evita que se borre la carpeta raíz)
+# ============================================================================
+function New-ACLRule-DenyDelete {
+    param([object]$Identity)
+    
+    return New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $Identity, 
+        [System.Security.AccessControl.FileSystemRights]::Delete,
+        "None",  # No heredar - solo esta carpeta
+        "None", 
+        "Deny"
+    )
+}
+
+# ============================================================================
+# FUNCION: Aplicar ACL limpia a una carpeta
 # ============================================================================
 function Set-FolderACL {
     param(
         [string]$Path,
         [System.Security.AccessControl.FileSystemAccessRule[]]$Rules
     )
-    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $acl = Get-Acl $Path
     $acl.SetAccessRuleProtection($true, $false)
-    foreach ($rule in $Rules) { $acl.AddAccessRule($rule) }
+    foreach ($rule in $Rules) {
+        $acl.AddAccessRule($rule)
+    }
     Set-Acl -Path $Path -AclObject $acl
 }
 
 # ============================================================================
-# Otorgar "Log on locally" (SeInteractiveLogonRight) via secedit
+# FUNCION: Otorgar derecho "Log on locally" requerido por IIS FTP
 # ============================================================================
-function Grant-LogonRight {
+function Grant-FTPLogonRight {
     param([string]$Username)
 
-    $exportInf = "$env:TEMP\sec_export.inf"
-    $applyInf  = "$env:TEMP\sec_apply.inf"
-    $applyDb   = "$env:TEMP\sec_apply.sdb"
+    $exportInf = "$env:TEMP\secedit_export.inf"
+    $applyInf  = "$env:TEMP\secedit_apply.inf"
+    $applyDb   = "$env:TEMP\secedit_apply.sdb"
 
+    # Exportar politica actual
     & secedit /export /cfg $exportInf /quiet 2>$null
-    $cfg   = Get-Content $exportInf -ErrorAction SilentlyContinue
+
+    $cfg = Get-Content $exportInf -ErrorAction SilentlyContinue
     $linea = $cfg | Where-Object { $_ -match "^SeInteractiveLogonRight" }
 
+    # Si ya tiene el usuario, no hacer nada
     if ($linea -and $linea -match [regex]::Escape($Username)) {
-        Print-Info "  '$Username' ya tiene SeInteractiveLogonRight."
-        Remove-Item $exportInf -ErrorAction SilentlyContinue
+        Print-Info "  '$Username' ya tiene derecho de logon local."
         return
     }
 
-    $nuevaLinea = if ($linea) { "$linea,$Username" } else { "SeInteractiveLogonRight = $Username" }
+    # Construir nueva linea agregando el usuario
+    if ($linea) {
+        $nuevaLinea = "$linea,*$Username"
+    } else {
+        $nuevaLinea = "SeInteractiveLogonRight = *$Username"
+    }
 
-    @"
+    $infContent = @"
 [Unicode]
 Unicode=yes
 [Version]
@@ -108,238 +173,196 @@ signature="`$CHICAGO`$"
 Revision=1
 [Privilege Rights]
 $nuevaLinea
-"@ | Out-File -FilePath $applyInf -Encoding Unicode
-
+"@
+    $infContent | Out-File -FilePath $applyInf -Encoding Unicode
     & secedit /configure /db $applyDb /cfg $applyInf /quiet 2>$null
+
     Remove-Item $exportInf, $applyInf, $applyDb -ErrorAction SilentlyContinue
-    Print-Ok "  SeInteractiveLogonRight otorgado a '$Username'."
+    Print-Ok "  Derecho 'Log on locally' otorgado a '$Username'."
 }
 
 # ============================================================================
-# Verificar instalacion IIS + FTP
+# FUNCION: Verificar instalacion de IIS y FTP
 # ============================================================================
 function Verificar-Instalacion {
     Print-Info "Verificando instalacion de IIS y FTP..."
-    $iis = Get-WindowsFeature -Name "Web-Server"     -ErrorAction SilentlyContinue
-    $ftp = Get-WindowsFeature -Name "Web-Ftp-Server" -ErrorAction SilentlyContinue
+    $iis = Get-WindowsFeature -Name "Web-Server"      -ErrorAction SilentlyContinue
+    $ftp = Get-WindowsFeature -Name "Web-Ftp-Server"  -ErrorAction SilentlyContinue
+
     if ($iis.Installed -and $ftp.Installed) {
         Print-Ok "IIS y FTP Service instalados."
         return $true
     }
     if (-not $iis.Installed) { Print-Error "IIS (Web-Server) no instalado." }
-    if (-not $ftp.Installed) { Print-Error "FTP (Web-Ftp-Server) no instalado." }
+    if (-not $ftp.Installed) { Print-Error "FTP Service (Web-Ftp-Server) no instalado." }
     return $false
 }
 
 # ============================================================================
-# Firewall
+# FUNCION: Configurar firewall
 # ============================================================================
 function Configurar-Firewall {
     Print-Info "Configurando firewall..."
+
     if (-not (Get-NetFirewallRule -DisplayName "FTP Puerto 21" -ErrorAction SilentlyContinue)) {
-        New-NetFirewallRule -DisplayName "FTP Puerto 21" -Direction Inbound -Protocol TCP -LocalPort 21 -Action Allow | Out-Null
+        New-NetFirewallRule -DisplayName "FTP Puerto 21" `
+            -Direction Inbound -Protocol TCP -LocalPort 21 -Action Allow | Out-Null
         Print-Ok "Puerto 21 abierto."
     } else { Print-Info "Regla puerto 21 ya existe." }
 
     if (-not (Get-NetFirewallRule -DisplayName "FTP Pasivo 40000-40100" -ErrorAction SilentlyContinue)) {
-        New-NetFirewallRule -DisplayName "FTP Pasivo 40000-40100" -Direction Inbound -Protocol TCP -LocalPort 40000-40100 -Action Allow | Out-Null
-        Print-Ok "Puertos pasivos abiertos."
+        New-NetFirewallRule -DisplayName "FTP Pasivo 40000-40100" `
+            -Direction Inbound -Protocol TCP -LocalPort 40000-40100 -Action Allow | Out-Null
+        Print-Ok "Puertos pasivos 40000-40100 abiertos."
     } else { Print-Info "Regla puertos pasivos ya existe." }
 }
 
 # ============================================================================
-# Crear grupos locales
+# FUNCION: Crear grupos locales
 # ============================================================================
 function Crear-Grupos {
-    Print-Info "Verificando grupos..."
-    foreach ($g in @($GRUPO_REPROBADOS, $GRUPO_RECURSADORES)) {
-        if (-not (Get-LocalGroup -Name $g -ErrorAction SilentlyContinue)) {
-            New-LocalGroup -Name $g -Description "Grupo FTP $g" | Out-Null
-            Print-Ok "Grupo '$g' creado."
-        } else { Print-Info "Grupo '$g' ya existe." }
+    Print-Info "Verificando grupos del sistema..."
+    foreach ($grupo in @($GRUPO_REPROBADOS, $GRUPO_RECURSADORES)) {
+        if (-not (Get-LocalGroup -Name $grupo -ErrorAction SilentlyContinue)) {
+            New-LocalGroup -Name $grupo -Description "Grupo FTP $grupo" | Out-Null
+            Print-Ok "Grupo '$grupo' creado."
+        } else {
+            Print-Info "Grupo '$grupo' ya existe."
+        }
     }
 }
 
 # ============================================================================
-# Estructura de directorios y permisos base
+# FUNCION: Crear estructura de directorios base
 #
 # C:\ftp\
-#   LocalUser\
-#     Public\          <- home anonimo (IUSR)
-#       general\       <- carpeta publica compartida
-#     reprobados\      <- carpeta del grupo reprobados
-#     recursadores\    <- carpeta del grupo recursadores
-#     <usuario>\       <- home del usuario (creado al crear usuario)
+# └── LocalUser\
+#     ├── Public\          <- home del anonimo
+#     │   └── general\     <- carpeta publica compartida
+#     ├── reprobados\      <- carpeta compartida del grupo
+#     └── recursadores\    <- carpeta compartida del grupo
 # ============================================================================
 function Crear-Estructura-Base {
     Print-Info "Creando estructura de directorios..."
 
-    foreach ($dir in @(
+    $dirs = @(
         $FTP_ROOT,
         "$FTP_ROOT\LocalUser",
         "$FTP_ROOT\LocalUser\Public",
         "$FTP_ROOT\LocalUser\Public\general",
         "$FTP_ROOT\LocalUser\reprobados",
         "$FTP_ROOT\LocalUser\recursadores"
-    )) {
+    )
+
+    foreach ($dir in $dirs) {
         if (-not (Test-Path $dir)) {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
             Print-Ok "Creado: $dir"
-        } else { Print-Info "Ya existe: $dir" }
+        } else {
+            Print-Info "Ya existe: $dir"
+        }
     }
 
-    # Raiz FTP: IUSR necesita leer para que IIS pueda resolver paths
+    # --- Permisos raiz FTP: solo admins
     Set-FolderACL -Path $FTP_ROOT -Rules @(
         (New-ACLRule $ID_ADMINS "FullControl"),
-        (New-ACLRule $ID_SYSTEM "FullControl"),
-        (New-ACLRule $ID_IUSR   "ReadAndExecute"),
-        (New-ACLRule $ID_AUTH   "ReadAndExecute")
+        (New-ACLRule $ID_SYSTEM "FullControl")
     )
 
-    # LocalUser: IIS recorre esta carpeta para encontrar homes
-    Set-FolderACL -Path "$FTP_ROOT\LocalUser" -Rules @(
-        (New-ACLRule $ID_ADMINS "FullControl"),
-        (New-ACLRule $ID_SYSTEM "FullControl"),
-        (New-ACLRule $ID_IUSR   "ReadAndExecute"),
-        (New-ACLRule $ID_AUTH   "ReadAndExecute")
-    )
-
-    # Public: home del usuario anonimo
+    # --- Permisos LocalUser\Public (home anonimo)
+    # IUSR solo puede listar esta carpeta, pero NO su contenido directamente
+    # Solo llegara a ver 'general' porque es la unica subcarpeta
     Set-FolderACL -Path "$FTP_ROOT\LocalUser\Public" -Rules @(
         (New-ACLRule $ID_ADMINS "FullControl"),
         (New-ACLRule $ID_SYSTEM "FullControl"),
-        (New-ACLRule $ID_IUSR   "ReadAndExecute"),
-        (New-ACLRule $ID_AUTH   "ReadAndExecute")
+        (New-ACLRule $ID_IUSR   "ReadAndExecute")
     )
 
-    # general: todos leen y escriben, anonimo solo lee
+    # --- Permisos general: autenticados escriben pero NO pueden borrar la carpeta
     Set-FolderACL -Path "$FTP_ROOT\LocalUser\Public\general" -Rules @(
         (New-ACLRule $ID_ADMINS "FullControl"),
         (New-ACLRule $ID_SYSTEM "FullControl"),
         (New-ACLRule $ID_AUTH   "Modify"),
+        (New-ACLRule-DenyDelete $ID_AUTH),
         (New-ACLRule $ID_IUSR   "ReadAndExecute")
     )
-    Print-Ok "Permisos 'general' configurados."
+    Print-Ok "Permisos 'general' configurados (usuarios NO pueden borrar la carpeta)."
 
-    # Carpetas de grupo: solo el grupo respectivo, anonimo sin acceso
-    foreach ($g in @($GRUPO_REPROBADOS, $GRUPO_RECURSADORES)) {
-        Set-FolderACL -Path "$FTP_ROOT\LocalUser\$g" -Rules @(
+    # --- Permisos carpetas de grupo: grupo puede escribir pero NO borrar la carpeta
+    foreach ($grupo in @($GRUPO_REPROBADOS, $GRUPO_RECURSADORES)) {
+        # Obtener identidad del grupo para Deny
+        $grupoIdentity = New-Object System.Security.Principal.NTAccount($grupo)
+        
+        Set-FolderACL -Path "$FTP_ROOT\LocalUser\$grupo" -Rules @(
             (New-ACLRule $ID_ADMINS "FullControl"),
             (New-ACLRule $ID_SYSTEM "FullControl"),
-            (New-ACLRule $g         "Modify")
+            (New-ACLRule $grupo     "Modify"),
+            (New-ACLRule-DenyDelete $grupoIdentity)
+            # IUSR no tiene regla aqui: sin acceso a carpetas de grupo
         )
-        Print-Ok "Permisos '$g' configurados."
+        Print-Ok "Permisos '$grupo' configurados (grupo NO puede borrar la carpeta)."
     }
 
     Print-Ok "Estructura base lista."
 }
 
 # ============================================================================
-# FIX SSL: editar applicationHost.config con XPath directo
-# Evita el error 800710D8 que ocurre cuando no hay certificado instalado
-# ============================================================================
-function Fix-SSL-Config {
-    param([string]$SiteName)
-
-    $configFile = "$env:SystemRoot\System32\inetsrv\config\applicationHost.config"
-
-    try {
-        [xml]$xml = Get-Content $configFile -Encoding UTF8 -Raw
-
-        $site = $xml.configuration.'system.applicationHost'.sites.site |
-            Where-Object { $_.name -eq $SiteName }
-
-        if (-not $site) { Print-Warn "  Sitio no encontrado en config."; return $false }
-
-        $ftpServer = $site.ftpServer
-        if (-not $ftpServer) { Print-Warn "  Nodo ftpServer no encontrado."; return $false }
-
-        $security = $ftpServer.security
-        if (-not $security) {
-            $security = $xml.CreateElement("security")
-            $ftpServer.AppendChild($security) | Out-Null
-        }
-
-        $ssl = $security.ssl
-        if (-not $ssl) {
-            $ssl = $xml.CreateElement("ssl")
-            $security.AppendChild($ssl) | Out-Null
-        }
-
-        # 0 = SslAllow: permite conexiones sin cifrar (sin certificado)
-        $ssl.SetAttribute("controlChannelPolicy", "0")
-        $ssl.SetAttribute("dataChannelPolicy",    "0")
-        $ssl.SetAttribute("serverCertHash",       "")
-        $ssl.SetAttribute("serverCertStoreName",  "MY")
-
-        $xml.Save($configFile)
-        Print-Ok "  SSL = SslAllow (texto plano permitido)."
-        return $true
-    } catch {
-        Print-Warn "  Error editando config SSL: $_"
-        return $false
-    }
-}
-
-# ============================================================================
-# Configurar sitio FTP en IIS
+# FUNCION: Configurar sitio FTP en IIS
 # ============================================================================
 function Configurar-FTP {
-    Print-Info "Configurando sitio FTP..."
+    Print-Info "Configurando sitio FTP en IIS..."
 
     Import-Module WebAdministration -ErrorAction Stop
 
-    # 1. Parar el servicio FTP completamente antes de modificar config
-    Print-Info "Deteniendo servicio FTP..."
-    Stop-Service ftpsvc -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 3
-
-    # 2. Eliminar sitio anterior via appcmd (evita errores de PS con 800710D8)
-    $existe = & $APPCMD list site /site.name:"$FTP_SITE_NAME" 2>$null
-    if ($existe) {
-        & $APPCMD delete site /site.name:"$FTP_SITE_NAME" 2>$null
+    # Eliminar sitio anterior si existe
+    if (Get-WebSite -Name $FTP_SITE_NAME -ErrorAction SilentlyContinue) {
+        & "$env:SystemRoot\System32\inetsrv\appcmd.exe" stop site $FTP_SITE_NAME 2>$null
+        Remove-WebSite -Name $FTP_SITE_NAME
         Print-Info "Sitio anterior eliminado."
-        Start-Sleep -Seconds 1
     }
 
-    # 3. Crear sitio FTP con appcmd
-    & $APPCMD add site /name:"$FTP_SITE_NAME" /id:2 /bindings:"ftp/*:21:" /physicalPath:"$FTP_ROOT" 2>$null
+    # Crear sitio FTP apuntando a la raiz
+    New-WebFtpSite -Name $FTP_SITE_NAME -Port $FTP_PORT -PhysicalPath $FTP_ROOT -Force | Out-Null
     Print-Ok "Sitio '$FTP_SITE_NAME' creado."
-    Start-Sleep -Seconds 1
 
-    # 4. FIX SSL: editar applicationHost.config ANTES de arrancar el servicio
-    Print-Info "Configurando SSL en applicationHost.config..."
-    Fix-SSL-Config -SiteName $FTP_SITE_NAME
+    # User Isolation modo 3: enjaula cada usuario en LocalUser\<username>
+    Set-ItemProperty "IIS:\Sites\$FTP_SITE_NAME" `
+        -Name "ftpServer.userIsolation.mode" -Value 3
+    Print-Ok "User Isolation activado."
 
-    # 5. Arrancar servicio para cargar la nueva config
-    Start-Service ftpsvc -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 4
+    # Autenticacion basica y anonima
+    Set-ItemProperty "IIS:\Sites\$FTP_SITE_NAME" `
+        -Name "ftpServer.security.authentication.basicAuthentication.enabled" -Value $true
+    Set-ItemProperty "IIS:\Sites\$FTP_SITE_NAME" `
+        -Name "ftpServer.security.authentication.anonymousAuthentication.enabled" -Value $true
+    Print-Ok "Autenticacion configurada."
 
-    # 6. User Isolation modo 3 = IsolateAllDirectories
-    #    Cada usuario enjaulado en C:\ftp\LocalUser\<usuario>\
-    try {
-        Set-ItemProperty "IIS:\Sites\$FTP_SITE_NAME" -Name "ftpServer.userIsolation.mode" -Value 3
-        Print-Ok "User Isolation modo 3 activado."
-    } catch {
-        & $APPCMD set site "$FTP_SITE_NAME" /ftpServer.userIsolation.mode:3 2>$null
-        Print-Ok "User Isolation modo 3 activado (via appcmd)."
+    # SSL deshabilitado (entorno de laboratorio)
+    # Usar valor numerico 0 directamente en el XML para evitar error 0x800710D8
+    $configFile = "$env:SystemRoot\System32\inetsrv\config\applicationHost.config"
+    [xml]$xml = Get-Content $configFile
+
+    $siteNode = $xml.configuration.'system.applicationHost'.sites.site |
+        Where-Object { $_.name -eq $FTP_SITE_NAME }
+
+    if ($siteNode) {
+        $sslNode = $siteNode.ftpServer.security.ssl
+        if ($sslNode) {
+            $sslNode.SetAttribute("controlChannelPolicy", "SslAllow")
+            $sslNode.SetAttribute("dataChannelPolicy",    "SslAllow")
+            $sslNode.SetAttribute("serverCertHash",       "")
+            $sslNode.SetAttribute("serverCertStoreName",  "")
+            $xml.Save($configFile)
+            Print-Ok "SSL configurado correctamente en applicationHost.config."
+        }
     }
 
-    # 7. Autenticacion basica y anonima
-    try {
-        Set-ItemProperty "IIS:\Sites\$FTP_SITE_NAME" `
-            -Name "ftpServer.security.authentication.basicAuthentication.enabled"   -Value $true
-        Set-ItemProperty "IIS:\Sites\$FTP_SITE_NAME" `
-            -Name "ftpServer.security.authentication.anonymousAuthentication.enabled" -Value $true
-        Print-Ok "Autenticacion basica y anonima habilitadas."
-    } catch {
-        & $APPCMD set site "$FTP_SITE_NAME" `
-            /ftpServer.security.authentication.basicAuthentication.enabled:true `
-            /ftpServer.security.authentication.anonymousAuthentication.enabled:true 2>$null
-        Print-Ok "Autenticacion configurada (via appcmd)."
-    }
+    # SSL deshabilitado (entorno de laboratorio) - Permitir texto plano
+    Set-ItemProperty -Path "IIS:\Sites\$FTP_SITE_NAME" -Name "ftpServer.security.ssl.controlChannelPolicy" -Value "SslAllow"
+    Set-ItemProperty -Path "IIS:\Sites\$FTP_SITE_NAME" -Name "ftpServer.security.ssl.dataChannelPolicy" -Value "SslAllow"
+    Print-Ok "SSL configurado para permitir texto plano."
 
-    # 8. Puertos pasivos
+    # Puertos pasivos
     Set-WebConfigurationProperty -PSPath "IIS:\" `
         -Filter "system.ftpServer/firewallSupport" `
         -Name "lowDataChannelPort"  -Value 40000
@@ -348,245 +371,298 @@ function Configurar-FTP {
         -Name "highDataChannelPort" -Value 40100
     Print-Ok "Puertos pasivos 40000-40100 configurados."
 
-    # 9. Reglas de autorizacion FTP
+    # Limpiar reglas anteriores
     Clear-WebConfiguration "/system.ftpServer/security/authorization" `
         -PSPath "IIS:\" -Location $FTP_SITE_NAME -ErrorAction SilentlyContinue
 
-    # Anonimo: solo lectura
+    # Anonimo: solo lectura (vera unicamente general por permisos NTFS)
     Add-WebConfiguration "/system.ftpServer/security/authorization" `
         -PSPath "IIS:\" -Location $FTP_SITE_NAME `
         -Value @{ accessType="Allow"; users="?"; roles=""; permissions=1 } `
         -ErrorAction SilentlyContinue
 
-    # Autenticados: lectura + escritura
+    # Usuarios autenticados: lectura y escritura
     Add-WebConfiguration "/system.ftpServer/security/authorization" `
         -PSPath "IIS:\" -Location $FTP_SITE_NAME `
         -Value @{ accessType="Allow"; users="*"; roles=""; permissions=3 } `
         -ErrorAction SilentlyContinue
 
-    Print-Ok "Reglas de autorizacion configuradas."
-
-    # 10. Reinicio final
+    # Reiniciar servicio FTP para aplicar cambios del XML
     Stop-Service ftpsvc -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
     Start-Service ftpsvc
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
 
-    & $APPCMD start site /site.name:"$FTP_SITE_NAME" 2>$null
-    Start-Sleep -Seconds 1
-
-    $estadoFinal = & $APPCMD list site /site.name:"$FTP_SITE_NAME" 2>$null
-    $svcStatus   = (Get-Service ftpsvc -ErrorAction SilentlyContinue).Status
-
-    if ($svcStatus -eq "Running") { Print-Ok "Servicio ftpsvc: Running" }
-    else { Print-Error "Servicio ftpsvc no esta corriendo: $svcStatus" }
-
-    Print-Ok "Sitio: $estadoFinal"
+    # Arrancar sitio
+    & "$env:SystemRoot\System32\inetsrv\appcmd.exe" start site $FTP_SITE_NAME
+    $estado = (& "$env:SystemRoot\System32\inetsrv\appcmd.exe" list site $FTP_SITE_NAME)
+    Print-Ok "Estado del sitio: $estado"
 }
 
 # ============================================================================
-# Construir jaula del usuario con junctions
+# FUNCION: Construir jaula del usuario con junctions del sistema de archivos
 #
-# Resultado visible al conectarse por FTP:
-#   /                    C:\ftp\LocalUser\<usuario>\
-#   ├── general\         junction -> C:\ftp\LocalUser\Public\general
-#   ├── reprobados\      junction -> C:\ftp\LocalUser\reprobados
-#   └── <usuario>\       carpeta personal fisica
+# Estructura visible al usuario al conectarse:
+#   /                    <- C:\ftp\LocalUser\<usuario>\
+#   ├── general\         <- junction -> C:\ftp\LocalUser\Public\general
+#   ├── reprobados\      <- junction -> C:\ftp\LocalUser\reprobados
+#   │   (o recursadores)
+#   └── <usuario>\       <- carpeta personal fisica
 #
-# FIX 530: La carpeta home C:\ftp\LocalUser\<usuario>\ DEBE tener
-# IUSR con ReadAndExecute. IIS verifica el home bajo IUSR antes
-# de autenticar al usuario. Sin esto => "530 home directory inaccessible"
+# NOTA: Se usan junctions (mklink /J) porque IIS FTP User Isolation
+# NO muestra Virtual Directories en el listado de directorios.
 # ============================================================================
 function Construir-Jaula-Usuario {
-    param([string]$usuario, [string]$grupo)
+    param(
+        [string]$usuario,
+        [string]$grupo
+    )
 
     Print-Info "Construyendo jaula FTP para '$usuario'..."
 
     $jaula    = "$FTP_ROOT\LocalUser\$usuario"
     $personal = "$jaula\$usuario"
 
-    New-Item -ItemType Directory -Path $jaula    -Force -ErrorAction SilentlyContinue | Out-Null
-    New-Item -ItemType Directory -Path $personal -Force -ErrorAction SilentlyContinue | Out-Null
+    # Crear carpeta home del usuario
+    if (-not (Test-Path $jaula)) {
+        New-Item -ItemType Directory -Path $jaula -Force | Out-Null
+    }
 
-    # Obtener cuenta del usuario via SID
-    $userSID     = (Get-LocalUser -Name $usuario -ErrorAction Stop).SID
+    # Crear carpeta personal fisica dentro del home
+    if (-not (Test-Path $personal)) {
+        New-Item -ItemType Directory -Path $personal -Force | Out-Null
+    }
+
+    # Obtener SID del usuario para permisos (evita problemas de idioma)
+    $userSID     = (Get-LocalUser -Name $usuario).SID
     $userAccount = $userSID.Translate([System.Security.Principal.NTAccount])
 
-    # ===== FIX CRITICO PARA ERROR 530 =====
-    # IIS FTP verifica el home del usuario bajo la cuenta IUSR ANTES de validar
-    # credenciales. Si IUSR no tiene ReadAndExecute en la jaula => 530.
+    # Permisos home del usuario
     Set-FolderACL -Path $jaula -Rules @(
         (New-ACLRule $ID_ADMINS   "FullControl"),
         (New-ACLRule $ID_SYSTEM   "FullControl"),
-        (New-ACLRule $ID_IUSR     "ReadAndExecute"),
-        (New-ACLRule $userAccount "Modify")
+        (New-ACLRule $userAccount "ReadAndExecute")
     )
-    # ======================================
 
-    # Carpeta personal: solo el usuario
+    # Permisos carpeta personal (usuario NO puede borrar su propia carpeta raíz)
     Set-FolderACL -Path $personal -Rules @(
         (New-ACLRule $ID_ADMINS   "FullControl"),
         (New-ACLRule $ID_SYSTEM   "FullControl"),
-        (New-ACLRule $userAccount "Modify")
+        (New-ACLRule $userAccount "Modify"),
+        (New-ACLRule-DenyDelete $userAccount)
     )
-    Print-Ok "  Carpeta personal: $personal"
+    Print-Ok "  Carpeta personal: $personal (usuario NO puede borrarla)"
 
-    # Junctions: IIS FTP muestra junctions en el listing (no Virtual Directories)
-    foreach ($juncInfo in @(
-        @{ Name = "general"; Target = "$FTP_ROOT\LocalUser\Public\general" },
-        @{ Name = $grupo;    Target = "$FTP_ROOT\LocalUser\$grupo" }
-    )) {
-        $jPath = "$jaula\$($juncInfo.Name)"
-        if (Test-Path $jPath) { cmd /c "rmdir `"$jPath`"" 2>$null }
-        cmd /c "mklink /J `"$jPath`" `"$($juncInfo.Target)`"" 2>$null
-        if (Test-Path $jPath) { Print-Ok "  Junction '$($juncInfo.Name)' creado." }
-        else { Print-Error "  Fallo junction '$($juncInfo.Name)'." }
+    # Junction: general -> C:\ftp\LocalUser\Public\general (compartida todos)
+    $jGeneral = "$jaula\general"
+    if (-not (Test-Path $jGeneral)) {
+        cmd /c "mklink /J `"$jGeneral`" `"$FTP_ROOT\LocalUser\Public\general`"" | Out-Null
+        Print-Ok "  Junction 'general' creado."
+    } else {
+        Print-Info "  Junction 'general' ya existe."
+    }
+
+    # Junction: <grupo> -> C:\ftp\LocalUser\<grupo> (solo su grupo)
+    $jGrupo = "$jaula\$grupo"
+    if (-not (Test-Path $jGrupo)) {
+        cmd /c "mklink /J `"$jGrupo`" `"$FTP_ROOT\LocalUser\$grupo`"" | Out-Null
+        Print-Ok "  Junction '$grupo' creado."
+    } else {
+        Print-Info "  Junction '$grupo' ya existe."
     }
 
     Print-Ok "Jaula lista para '$usuario'."
 }
 
 # ============================================================================
-# Destruir jaula del usuario
+# FUNCION: Destruir jaula del usuario
 # ============================================================================
 function Destruir-Jaula-Usuario {
     param([string]$usuario)
 
     Print-Info "Eliminando jaula de '$usuario'..."
+
     $jaula = "$FTP_ROOT\LocalUser\$usuario"
 
+    # Eliminar junctions con rmdir (NO usar Remove-Item, borraria el contenido real)
     foreach ($junc in @("general", $GRUPO_REPROBADOS, $GRUPO_RECURSADORES)) {
-        $jPath = "$jaula\$junc"
-        if (Test-Path $jPath) { cmd /c "rmdir `"$jPath`"" 2>$null; Print-Ok "  Junction '$junc' eliminado." }
+        $juncPath = "$jaula\$junc"
+        if (Test-Path $juncPath) {
+            cmd /c "rmdir `"$juncPath`"" | Out-Null
+            Print-Ok "  Junction '$junc' eliminado."
+        }
     }
 
+    # Eliminar carpeta home
+    $jaula = "$FTP_ROOT\LocalUser\$usuario"
     if (Test-Path $jaula) {
-        Remove-Item -Path $jaula -Recurse -Force -ErrorAction SilentlyContinue
-        Print-Ok "  Home del usuario eliminado."
+        Remove-Item -Path $jaula -Recurse -Force
+        Print-Ok "  Carpeta home eliminada."
     }
 }
 
 # ============================================================================
-# Validar nombre de usuario
+# FUNCION: Validar nombre de usuario
 # ============================================================================
 function Validar-Usuario {
     param([string]$usuario)
-    if ([string]::IsNullOrEmpty($usuario))                           { Print-Error "Nombre vacio.";                                   return $false }
-    if ($usuario.Length -lt 3 -or $usuario.Length -gt 20)          { Print-Error "Entre 3 y 20 caracteres.";                        return $false }
-    if ($usuario -notmatch '^[a-zA-Z][a-zA-Z0-9_-]*$')             { Print-Error "Solo letras/numeros/_/-. Debe iniciar con letra."; return $false }
-    if (Get-LocalUser -Name $usuario -ErrorAction SilentlyContinue) { Print-Error "El usuario '$usuario' ya existe.";                return $false }
+
+    if ([string]::IsNullOrEmpty($usuario)) {
+        Print-Error "El nombre no puede estar vacio."; return $false
+    }
+    if ($usuario.Length -lt 3 -or $usuario.Length -gt 20) {
+        Print-Error "El nombre debe tener entre 3 y 20 caracteres."; return $false
+    }
+    if ($usuario -notmatch '^[a-zA-Z][a-zA-Z0-9_-]*$') {
+        Print-Error "Solo letras, numeros, - y _. Debe iniciar con letra."; return $false
+    }
+    if (Get-LocalUser -Name $usuario -ErrorAction SilentlyContinue) {
+        Print-Error "El usuario '$usuario' ya existe."; return $false
+    }
     return $true
 }
 
 # ============================================================================
-# Crear usuario FTP
+# FUNCION: Crear usuario FTP
 # ============================================================================
 function Crear-Usuario-FTP {
-    param([string]$usuario, [string]$password, [string]$grupo)
+    param(
+        [string]$usuario,
+        [string]$password,
+        [string]$grupo
+    )
 
     Print-Info "Creando usuario '$usuario' en grupo '$grupo'..."
 
-    $secPass = ConvertTo-SecureString $password -AsPlainText -Force
+    # Crear usuario local del sistema
+    $securePass = ConvertTo-SecureString $password -AsPlainText -Force
     try {
-        New-LocalUser -Name $usuario -Password $secPass `
-            -PasswordNeverExpires -UserMayNotChangePassword `
+        New-LocalUser -Name $usuario -Password $securePass `
+            -PasswordNeverExpires `
+            -UserMayNotChangePassword `
             -Description "Usuario FTP - $grupo" | Out-Null
         Print-Ok "Usuario del sistema creado."
     } catch {
-        Print-Error "Error al crear '$usuario': $_"
+        Print-Error "Error al crear usuario '$usuario': $_"
         return $false
     }
 
     Start-Sleep -Seconds 1
-    Grant-LogonRight -Username $usuario
 
+    # Otorgar derecho de logon local (requerido por IIS FTP)
+    Grant-FTPLogonRight -Username $usuario
+
+    # Agregar al grupo
     $otroGrupo = if ($grupo -eq $GRUPO_REPROBADOS) { $GRUPO_RECURSADORES } else { $GRUPO_REPROBADOS }
     Remove-LocalGroupMember -Group $otroGrupo -Member $usuario -ErrorAction SilentlyContinue
     Add-LocalGroupMember    -Group $grupo      -Member $usuario -ErrorAction SilentlyContinue
-    Print-Ok "Agregado al grupo '$grupo'."
+    Print-Ok "Usuario agregado al grupo '$grupo'."
 
+    # Construir jaula con Virtual Directories
     Construir-Jaula-Usuario -usuario $usuario -grupo $grupo
 
     Write-Host ""
-    Print-Ok "══════════════════════════════════════════"
+    Print-Ok "═══════════════════════════════════════════"
     Print-Ok "  Usuario '$usuario' creado correctamente"
-    Print-Ok "══════════════════════════════════════════"
-    Print-Info "  /general/    (publica - todos leen y escriben)"
-    Print-Info "  /$grupo/     (solo tu grupo)"
-    Print-Info "  /$usuario/   (carpeta personal)"
-    Print-Ok "══════════════════════════════════════════"
+    Print-Ok "═══════════════════════════════════════════"
+    Print-Info "  Estructura al conectar por FTP:"
+    Print-Info "    /general/      (publica, todos leen y escriben)"
+    Print-Info "    /$grupo/       (solo tu grupo)"
+    Print-Info "    /$usuario/     (personal)"
+    Print-Ok "═══════════════════════════════════════════"
 
     return $true
 }
 
 # ============================================================================
-# Cambiar usuario de grupo
+# FUNCION: Cambiar usuario de grupo
 # ============================================================================
 function Cambiar-Grupo-Usuario {
     param([string]$usuario)
 
     if (-not (Get-LocalUser -Name $usuario -ErrorAction SilentlyContinue)) {
-        Print-Error "El usuario '$usuario' no existe."; return
+        Print-Error "El usuario '$usuario' no existe."
+        return
     }
 
+    # Detectar grupo actual
     $grupoActual = $null
     foreach ($g in @($GRUPO_REPROBADOS, $GRUPO_RECURSADORES)) {
         $miembros = Get-LocalGroupMember -Group $g -ErrorAction SilentlyContinue
         if ($miembros | Where-Object { ($_.Name -replace "^.*\\","") -eq $usuario }) {
-            $grupoActual = $g; break
+            $grupoActual = $g
+            break
         }
     }
 
     Print-Info "Grupo actual de '$usuario': $(if ($grupoActual) { $grupoActual } else { '(ninguno)' })"
+
+    Write-Host ""
+    Write-Host "  Nuevo grupo:"
     Write-Host "  1) $GRUPO_REPROBADOS"
     Write-Host "  2) $GRUPO_RECURSADORES"
-    $op = Read-Host "Nuevo grupo [1-2]"
-    $nuevoGrupo = switch ($op) {
-        "1" { $GRUPO_REPROBADOS } "2" { $GRUPO_RECURSADORES }
-        default { Print-Error "Invalido."; return }
+    $opcion = Read-Host "Seleccione [1-2]"
+
+    $nuevoGrupo = switch ($opcion) {
+        "1" { $GRUPO_REPROBADOS }
+        "2" { $GRUPO_RECURSADORES }
+        default { Print-Error "Opcion invalida."; return }
     }
 
-    if ($grupoActual -eq $nuevoGrupo) { Print-Info "Ya pertenece a '$nuevoGrupo'."; return }
+    if ($grupoActual -eq $nuevoGrupo) {
+        Print-Info "El usuario ya pertenece a '$nuevoGrupo'."
+        return
+    }
 
-    if ($grupoActual) { Remove-LocalGroupMember -Group $grupoActual -Member $usuario -ErrorAction SilentlyContinue }
-    Add-LocalGroupMember -Group $nuevoGrupo -Member $usuario -ErrorAction SilentlyContinue
-    Print-Ok "Grupo cambiado a '$nuevoGrupo'."
+    Print-Info "Cambiando '$usuario': '$grupoActual' -> '$nuevoGrupo'..."
 
-    $jaula = "$FTP_ROOT\LocalUser\$usuario"
+    # Cambiar grupo local
     if ($grupoActual) {
-        $jViejo = "$jaula\$grupoActual"
-        if (Test-Path $jViejo) { cmd /c "rmdir `"$jViejo`"" 2>$null; Print-Ok "Junction '$grupoActual' eliminado." }
+        Remove-LocalGroupMember -Group $grupoActual -Member $usuario -ErrorAction SilentlyContinue
+        Print-Ok "Removido de '$grupoActual'."
     }
-    $jNuevo = "$jaula\$nuevoGrupo"
-    if (Test-Path $jNuevo) { cmd /c "rmdir `"$jNuevo`"" 2>$null }
-    cmd /c "mklink /J `"$jNuevo`" `"$FTP_ROOT\LocalUser\$nuevoGrupo`"" 2>$null
-    Print-Ok "Junction '$nuevoGrupo' creado."
+    Add-LocalGroupMember -Group $nuevoGrupo -Member $usuario -ErrorAction SilentlyContinue
+    Print-Ok "Agregado a '$nuevoGrupo'."
 
-    # Actualizar permisos de la jaula (IUSR sigue presente)
-    $userSID     = (Get-LocalUser -Name $usuario).SID
-    $userAccount = $userSID.Translate([System.Security.Principal.NTAccount])
-    Set-FolderACL -Path $jaula -Rules @(
-        (New-ACLRule $ID_ADMINS   "FullControl"),
-        (New-ACLRule $ID_SYSTEM   "FullControl"),
-        (New-ACLRule $ID_IUSR     "ReadAndExecute"),
-        (New-ACLRule $userAccount "Modify")
-    )
+    # Actualizar junctions: eliminar la del grupo viejo y crear la nueva
+    $jaula = "$FTP_ROOT\LocalUser\$usuario"
+
+    if ($grupoActual) {
+        $juncViejo = "$jaula\$grupoActual"
+        if (Test-Path $juncViejo) {
+            cmd /c "rmdir `"$juncViejo`"" | Out-Null
+            Print-Ok "Junction '$grupoActual' eliminado."
+        }
+    }
+
+    $juncNuevo = "$jaula\$nuevoGrupo"
+    if (-not (Test-Path $juncNuevo)) {
+        cmd /c "mklink /J `"$juncNuevo`" `"$FTP_ROOT\LocalUser\$nuevoGrupo`"" | Out-Null
+        Print-Ok "Junction '$nuevoGrupo' creado."
+    }
+
     Print-Ok "Usuario '$usuario' movido a '$nuevoGrupo'."
+    Print-Info "Nueva estructura FTP:"
+    Print-Info "  /general/       (publica)"
+    Print-Info "  /$nuevoGrupo/   (nuevo grupo)"
+    Print-Info "  /$usuario/      (personal)"
 }
 
 # ============================================================================
-# Instalar y configurar servidor FTP
+# FUNCION: Instalar y configurar servidor FTP completo
 # ============================================================================
 function Instalar-FTP {
     Print-Titulo "Instalacion y Configuracion de Servidor FTP"
 
     if (Verificar-Instalacion) {
-        $r = Read-Host "IIS y FTP ya instalados. Reconfigurar? [s/N]"
-        if ($r -notmatch '^[Ss]$') { Print-Info "Cancelado."; return }
+        $reconf = Read-Host "IIS y FTP ya instalados. Reconfigurar? [s/N]"
+        if ($reconf -notmatch '^[Ss]$') { Print-Info "Cancelado."; return }
     } else {
         Print-Info "Instalando IIS y FTP Service..."
-        $res = Install-WindowsFeature -Name Web-Server,Web-Ftp-Server,Web-Ftp-Service,Web-Mgmt-Console -IncludeManagementTools
-        if ($res.Success) { Print-Ok "Instalacion completada." } else { Print-Error "Error en la instalacion."; return }
+        $result = Install-WindowsFeature -Name Web-Server, Web-Ftp-Server, Web-Ftp-Service, Web-Mgmt-Console `
+            -IncludeManagementTools
+        if ($result.Success) { Print-Ok "IIS y FTP instalados." }
+        else { Print-Error "Error en la instalacion."; return }
     }
 
     Import-Module WebAdministration -ErrorAction Stop
@@ -596,75 +672,32 @@ function Instalar-FTP {
     Configurar-FTP
     Configurar-Firewall
 
-    # Re-aplicar permisos de jaulas existentes (usuarios creados antes del fix)
-    Print-Info "Actualizando permisos de usuarios existentes..."
-    foreach ($g in @($GRUPO_REPROBADOS, $GRUPO_RECURSADORES)) {
-        $miembros = Get-LocalGroupMember -Group $g -ErrorAction SilentlyContinue
-        foreach ($m in $miembros) {
-            $nombre = $m.Name -replace ".*\\", ""
-            $jaula  = "$FTP_ROOT\LocalUser\$nombre"
-            if (Test-Path $jaula) {
-                $u = Get-LocalUser -Name $nombre -ErrorAction SilentlyContinue
-                if ($u) {
-                    $ua = $u.SID.Translate([System.Security.Principal.NTAccount])
-                    Set-FolderACL -Path $jaula -Rules @(
-                        (New-ACLRule $ID_ADMINS "FullControl"),
-                        (New-ACLRule $ID_SYSTEM "FullControl"),
-                        (New-ACLRule $ID_IUSR   "ReadAndExecute"),
-                        (New-ACLRule $ua        "Modify")
-                    )
-                    Print-Ok "  Permisos actualizados: '$nombre'"
-                }
-            }
-        }
-    }
-
     $ip = (Get-NetIPAddress -AddressFamily IPv4 |
-        Where-Object { $_.IPAddress -ne "127.0.0.1" -and $_.InterfaceAlias -notmatch "Loopback" } |
+        Where-Object { $_.IPAddress -ne "127.0.0.1" } |
         Select-Object -First 1).IPAddress
 
     Write-Host ""
-    Print-Ok "══════════════════════════════════════════════════"
+    Print-Ok "══════════════════════════════════════════════"
     Print-Ok "  Servidor FTP listo"
-    Print-Ok "══════════════════════════════════════════════════"
-    Print-Info "  IP      : $ip"
-    Print-Info "  Puerto  : 21"
-    Print-Info "  Anonimo : ftp://$ip  (solo lectura en /general)"
-    Print-Ok "══════════════════════════════════════════════════"
-    Print-Info "Siguiente paso: .\ftp-windows.ps1 -users"
+    Print-Ok "══════════════════════════════════════════════"
+    Print-Info "  IP     : $ip"
+    Print-Info "  Puerto : 21"
+    Print-Info "  Anon   : ftp://$ip  (solo lectura en /general)"
+    Print-Ok "══════════════════════════════════════════════"
+    Print-Info "Cree usuarios con: .\ftp_server.ps1 -users"
 }
 
 # ============================================================================
-# Listar usuarios FTP
-# ============================================================================
-function Listar-Usuarios-FTP {
-    Print-Titulo "Usuarios FTP"
-    $lista = @()
-    foreach ($g in @($GRUPO_REPROBADOS, $GRUPO_RECURSADORES)) {
-        $miembros = Get-LocalGroupMember -Group $g -ErrorAction SilentlyContinue
-        foreach ($m in $miembros) {
-            $nombre = $m.Name -replace ".*\\", ""
-            $lista += [PSCustomObject]@{
-                Usuario = $nombre
-                Grupo   = $g
-                Jaula   = if (Test-Path "$FTP_ROOT\LocalUser\$nombre") { "OK" } else { "FALTA" }
-            }
-        }
-    }
-    if ($lista.Count -eq 0) { Print-Info "Sin usuarios FTP."; return }
-    $lista | Format-Table -AutoSize
-}
-
-# ============================================================================
-# Gestionar usuarios
+# FUNCION: Gestionar usuarios FTP
 # ============================================================================
 function Gestionar-Usuarios {
     Print-Titulo "Gestion de Usuarios FTP"
 
     if (-not (Verificar-Instalacion)) {
-        Print-Error "IIS/FTP no instalado. Ejecute: .\ftp-windows.ps1 -install"
+        Print-Error "IIS/FTP no instalado. Ejecute: .\ftp_server.ps1 -install"
         return
     }
+
     Import-Module WebAdministration -ErrorAction SilentlyContinue
 
     Write-Host "  1) Crear nuevos usuarios"
@@ -673,119 +706,168 @@ function Gestionar-Usuarios {
     Write-Host "  4) Cambiar contrasena de usuario"
     Write-Host "  5) Volver"
     Write-Host ""
-    $op = Read-Host "Seleccione [1-5]"
+    $opcion = Read-Host "Seleccione [1-5]"
 
-    switch ($op) {
+    switch ($opcion) {
         "1" {
-            $num = Read-Host "Cuantos usuarios?"
-            if (-not ($num -match '^\d+$') -or [int]$num -lt 1) { Print-Error "Numero invalido."; return }
+            $num = Read-Host "Cuantos usuarios desea crear?"
+            if (-not ($num -match '^\d+$') -or [int]$num -lt 1) {
+                Print-Error "Numero invalido."; return
+            }
 
             for ($i = 1; $i -le [int]$num; $i++) {
-                Write-Host ""; Print-Titulo "Usuario $i de $num"
+                Write-Host ""
+                Print-Titulo "Usuario $i de $num"
 
-                do   { $usuario  = (Read-Host "Nombre de usuario").Trim() } while (-not (Validar-Usuario $usuario))
-                do   { $password = (Read-Host "Contrasena").Trim()        } while ([string]::IsNullOrWhiteSpace($password))
+                do { $usuario = (Read-Host "Nombre de usuario").Trim() } `
+                    while (-not (Validar-Usuario -usuario $usuario))
+
+                do { $password = (Read-Host "Contrasena (Que tenga al menos 8 caracteres, una mayuscula, un numero y un caracter especial)").Trim() } `
+                    while ([string]::IsNullOrWhiteSpace($password))
 
                 Write-Host "  1) $GRUPO_REPROBADOS"
                 Write-Host "  2) $GRUPO_RECURSADORES"
-                $gOp   = Read-Host "Grupo [1-2]"
+                $gOp = Read-Host "Grupo [1-2]"
                 $grupo = switch ($gOp) {
-                    "1"     { $GRUPO_REPROBADOS }
-                    "2"     { $GRUPO_RECURSADORES }
-                    default { Print-Warn "Invalido, asignando reprobados."; $GRUPO_REPROBADOS }
+                    "1" { $GRUPO_REPROBADOS }
+                    "2" { $GRUPO_RECURSADORES }
+                    default { Print-Warn "Opcion invalida, asignando a reprobados."; $GRUPO_REPROBADOS }
                 }
+
                 Crear-Usuario-FTP -usuario $usuario -password $password -grupo $grupo
             }
         }
-        "2" { Listar-Usuarios-FTP; $u = (Read-Host "Usuario").Trim(); Cambiar-Grupo-Usuario $u }
+
+        "2" {
+            Listar-Usuarios-FTP
+            $usuario = (Read-Host "Usuario a cambiar de grupo").Trim()
+            Cambiar-Grupo-Usuario -usuario $usuario
+        }
+
         "3" {
             Listar-Usuarios-FTP
-            $u = (Read-Host "Usuario a eliminar").Trim()
-            if (-not (Get-LocalUser -Name $u -ErrorAction SilentlyContinue)) { Print-Error "No existe."; return }
-            $c = Read-Host "Confirma eliminar '$u'? [s/N]"
-            if ($c -match '^[Ss]$') {
-                Destruir-Jaula-Usuario $u
-                Remove-LocalUser -Name $u -ErrorAction SilentlyContinue
-                Print-Ok "Usuario '$u' eliminado."
+            $usuario = (Read-Host "Usuario a eliminar").Trim()
+            if (-not (Get-LocalUser -Name $usuario -ErrorAction SilentlyContinue)) {
+                Print-Error "Usuario '$usuario' no existe."; return
+            }
+            $confirmar = Read-Host "Confirma eliminar '$usuario'? [s/N]"
+            if ($confirmar -match '^[Ss]$') {
+                Destruir-Jaula-Usuario -usuario $usuario
+                Remove-LocalUser -Name $usuario -ErrorAction SilentlyContinue
+                Print-Ok "Usuario '$usuario' eliminado."
             } else { Print-Info "Cancelado." }
         }
+
         "4" {
             Listar-Usuarios-FTP
-            $u = (Read-Host "Nombre del usuario").Trim()
-            if (-not (Get-LocalUser -Name $u -ErrorAction SilentlyContinue)) { Print-Error "No existe."; return }
-            $np = (Read-Host "Nueva contrasena").Trim()
-            Set-LocalUser -Name $u -Password (ConvertTo-SecureString $np -AsPlainText -Force)
-            Print-Ok "Contrasena actualizada."
+            $usuario = (Read-Host "Nombre del usuario").Trim()
+            if (-not (Get-LocalUser -Name $usuario -ErrorAction SilentlyContinue)) {
+                Print-Error "Usuario '$usuario' no existe."; return
+            }
+            $newPass = (Read-Host "Nueva contrasena").Trim()
+            $secPass = ConvertTo-SecureString $newPass -AsPlainText -Force
+            Set-LocalUser -Name $usuario -Password $secPass
+            Print-Ok "Contrasena de '$usuario' actualizada."
         }
+
         "5" { return }
         default { Print-Error "Opcion invalida." }
     }
 }
 
 # ============================================================================
-# Estado del servidor
+# FUNCION: Listar usuarios FTP
+# ============================================================================
+function Listar-Usuarios-FTP {
+    Print-Titulo "Usuarios FTP Configurados"
+
+    $usuarios = @()
+    foreach ($grupo in @($GRUPO_REPROBADOS, $GRUPO_RECURSADORES)) {
+        $miembros = Get-LocalGroupMember -Group $grupo -ErrorAction SilentlyContinue
+        foreach ($m in $miembros) {
+            $nombre = $m.Name -replace ".*\\", ""
+            $jaulaOk = Test-Path "$FTP_ROOT\LocalUser\$nombre"
+            $usuarios += [PSCustomObject]@{
+                Usuario  = $nombre
+                Grupo    = $grupo
+                Jaula    = if ($jaulaOk) { "OK" } else { "FALTA" }
+            }
+        }
+    }
+
+    if ($usuarios.Count -eq 0) { Print-Info "No hay usuarios FTP configurados."; return }
+    $usuarios | Format-Table -AutoSize
+}
+
+# ============================================================================
+# FUNCION: Ver estado del servidor
 # ============================================================================
 function Ver-Estado {
     Print-Titulo "ESTADO DEL SERVIDOR FTP"
+
     Import-Module WebAdministration -ErrorAction SilentlyContinue
 
+    # Servicio
     $svc = Get-Service -Name "ftpsvc" -ErrorAction SilentlyContinue
     if ($svc) {
         $color = if ($svc.Status -eq "Running") { "Green" } else { "Red" }
-        Write-Host "  Servicio ftpsvc : " -NoNewline; Write-Host $svc.Status -ForegroundColor $color
+        Write-Host "  Servicio ftpsvc : " -NoNewline
+        Write-Host $svc.Status -ForegroundColor $color
     }
 
-    $sitio = & $APPCMD list site /site.name:"$FTP_SITE_NAME" 2>$null
-    Write-Host "  Sitio IIS       : $sitio"
+    # Sitio
+    $estado = & "$env:SystemRoot\System32\inetsrv\appcmd.exe" list site $FTP_SITE_NAME 2>$null
+    Write-Host "  Sitio IIS       : $estado"
 
-    try {
-        $iso = (Get-ItemProperty "IIS:\Sites\$FTP_SITE_NAME" -Name "ftpServer.userIsolation.mode" -ErrorAction Stop).Value
-        $isoTxt = switch ($iso) { 3 { "IsolateAllDirectories (correcto)" } 0 { "Sin aislamiento (INCORRECTO)" } default { "Modo $iso" } }
-        Write-Host "  User Isolation  : $isoTxt"
-    } catch { Write-Host "  User Isolation  : (no se pudo leer)" -ForegroundColor Yellow }
+    # Isolation mode
+    $isolation = (Get-ItemProperty "IIS:\Sites\$FTP_SITE_NAME" `
+        -Name "ftpServer.userIsolation.mode" -ErrorAction SilentlyContinue).Value
+    $isoText = switch ($isolation) {
+        3 { "IsolateAllDirectories (correcto)" }
+        0 { "Sin aislamiento (incorrecto)" }
+        default { "Modo $isolation" }
+    }
+    Write-Host "  User Isolation  : $isoText"
 
     Write-Host ""
-    Print-Info "Conexiones en puerto 21:"
+    Print-Info "Conexiones activas en puerto 21:"
     netstat -an | Select-String ":21 "
+
     Write-Host ""
     Listar-Usuarios-FTP
 }
 
 # ============================================================================
-# Reiniciar FTP
+# FUNCION: Reiniciar FTP
 # ============================================================================
 function Reiniciar-FTP {
-    Print-Info "Reiniciando FTP..."
+    Print-Info "Reiniciando servidor FTP..."
     Stop-Service ftpsvc -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
     Start-Service ftpsvc
-    Start-Sleep -Seconds 3
-    & $APPCMD start site /site.name:"$FTP_SITE_NAME" 2>$null
-    Print-Ok "FTP reiniciado."
-    Ver-Estado
+    Start-Sleep -Seconds 2
+    & "$env:SystemRoot\System32\inetsrv\appcmd.exe" start site $FTP_SITE_NAME
+    Print-Ok "Servidor FTP reiniciado."
 }
 
 # ============================================================================
-# Ayuda
+# FUNCION: Mostrar ayuda
 # ============================================================================
 function Mostrar-Ayuda {
     Write-Host ""
-    Write-Host "Uso: .\ftp-windows.ps1 [opcion]" -ForegroundColor Cyan
+    Write-Host "Uso: .\ftp_server.ps1 [opcion]" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "  -install  (-i)   Instalar y configurar servidor FTP"
-    Write-Host "  -users    (-u)   Gestionar usuarios"
-    Write-Host "  -status   (-s)   Ver estado del servidor"
-    Write-Host "  -restart  (-r)   Reiniciar servicio FTP"
-    Write-Host "  -verify   (-v)   Verificar si IIS y FTP estan instalados"
-    Write-Host "  -list     (-l)   Listar usuarios"
-    Write-Host "  -help            Esta ayuda"
+    Write-Host "  -install   Instala y configura el servidor FTP (primera vez)"
+    Write-Host "  -users     Gestionar usuarios (crear, cambiar grupo, eliminar)"
+    Write-Host "  -status    Ver estado del servidor y usuarios"
+    Write-Host "  -restart   Reiniciar el servicio FTP"
+    Write-Host "  -verify    Verificar si IIS y FTP estan instalados"
+    Write-Host "  -list      Listar usuarios y estructura"
+    Write-Host "  -help      Mostrar esta ayuda"
     Write-Host ""
-    Write-Host "Primera vez:" -ForegroundColor Yellow
-    Write-Host "  1. .\ftp-windows.ps1 -install"
-    Write-Host "  2. .\ftp-windows.ps1 -users"
-    Write-Host ""
-    Write-Host "Si persiste el error 530 en usuarios ya creados:" -ForegroundColor Yellow
-    Write-Host "  .\ftp-windows.ps1 -install  (responder 's' a reconfigurar)"
+    Write-Host "Orden recomendado (primera vez):" -ForegroundColor Yellow
+    Write-Host "  1. .\ftp_server.ps1 -install"
+    Write-Host "  2. .\ftp_server.ps1 -users"
     Write-Host ""
 }
 
