@@ -65,11 +65,26 @@ function Protect-FolderFromDeletion {
 # FTP autentica via logon de red, no logon interactivo. Usar el derecho
 # incorrecto no bloquea el login directamente pero puede causar 530 en
 # configuraciones con politicas estrictas de "Deny logon locally".
+function Write-SeceditInf {
+    param([string]$Path, [string]$PrivilegeLine)
+    $lines = @(
+        "[Unicode]",
+        "Unicode=yes",
+        "[Version]",
+        'signature="$CHICAGO$"',
+        "Revision=1",
+        "[Privilege Rights]",
+        $PrivilegeLine
+    )
+    $lines | Out-File -FilePath $Path -Encoding Unicode
+}
+
 function Grant-FTPLogonRight {
     param([string]$Username)
     $exportInf = "$env:TEMP\secedit_export.inf"
     $applyInf  = "$env:TEMP\secedit_apply.inf"
     $applyDb   = "$env:TEMP\secedit_apply.sdb"
+
     & secedit /export /cfg $exportInf /quiet 2>$null
     $cfg = Get-Content $exportInf -ErrorAction SilentlyContinue
 
@@ -79,16 +94,7 @@ function Grant-FTPLogonRight {
         Print-Info "  '$Username' ya tiene SeNetworkLogonRight."
     } else {
         $nuevaLineaNet = if ($lineaNet) { "$lineaNet,*$Username" } else { "SeNetworkLogonRight = *$Username" }
-        $infContent = @"
-[Unicode]
-Unicode=yes
-[Version]
-signature="`$CHICAGO`$"
-Revision=1
-[Privilege Rights]
-$nuevaLineaNet
-"@
-        $infContent | Out-File -FilePath $applyInf -Encoding Unicode
+        Write-SeceditInf -Path $applyInf -PrivilegeLine $nuevaLineaNet
         & secedit /configure /db $applyDb /cfg $applyInf /quiet 2>$null
         Remove-Item $applyInf, $applyDb -ErrorAction SilentlyContinue
         Print-Ok "  SeNetworkLogonRight otorgado a '$Username'."
@@ -99,17 +105,8 @@ $nuevaLineaNet
     if ($lineaDeny -and $lineaDeny -match [regex]::Escape($Username)) {
         Print-Warn "  '$Username' esta en SeDenyNetworkLogonRight — removiendo..."
         $nuevaLineaDeny = ($lineaDeny -replace ",?\*?$Username", "").TrimEnd(",")
-        $infDeny = @"
-[Unicode]
-Unicode=yes
-[Version]
-signature="`$CHICAGO`$"
-Revision=1
-[Privilege Rights]
-$nuevaLineaDeny
-"@
-        $infDeny | Out-File -FilePath $applyInf -Encoding Unicode
         $applyDb2 = "$env:TEMP\secedit_apply2.sdb"
+        Write-SeceditInf -Path $applyInf -PrivilegeLine $nuevaLineaDeny
         & secedit /configure /db $applyDb2 /cfg $applyInf /quiet 2>$null
         Remove-Item $applyInf, $applyDb2 -ErrorAction SilentlyContinue
         Print-Ok "  '$Username' removido de SeDenyNetworkLogonRight."
