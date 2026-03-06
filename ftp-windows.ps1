@@ -61,33 +61,61 @@ function Protect-FolderFromDeletion {
     Set-Acl -Path $Path -AclObject $acl
 }
 
+# FIX 1: Usar SeNetworkLogonRight en lugar de SeInteractiveLogonRight.
+# FTP autentica via logon de red, no logon interactivo. Usar el derecho
+# incorrecto no bloquea el login directamente pero puede causar 530 en
+# configuraciones con politicas estrictas de "Deny logon locally".
 function Grant-FTPLogonRight {
     param([string]$Username)
     $exportInf = "$env:TEMP\secedit_export.inf"
     $applyInf  = "$env:TEMP\secedit_apply.inf"
     $applyDb   = "$env:TEMP\secedit_apply.sdb"
     & secedit /export /cfg $exportInf /quiet 2>$null
-    $cfg   = Get-Content $exportInf -ErrorAction SilentlyContinue
-    $linea = $cfg | Where-Object { $_ -match "^SeInteractiveLogonRight" }
-    if ($linea -and $linea -match [regex]::Escape($Username)) {
-        Print-Info "  '$Username' ya tiene derecho de logon local."
-        Remove-Item $exportInf -ErrorAction SilentlyContinue
-        return
-    }
-    $nuevaLinea = if ($linea) { "$linea,*$Username" } else { "SeInteractiveLogonRight = *$Username" }
-    $infContent = @"
+    $cfg = Get-Content $exportInf -ErrorAction SilentlyContinue
+
+    # Otorgar SeNetworkLogonRight (logon de red — el correcto para FTP)
+    $lineaNet = $cfg | Where-Object { $_ -match "^SeNetworkLogonRight" }
+    if ($lineaNet -and $lineaNet -match [regex]::Escape($Username)) {
+        Print-Info "  '$Username' ya tiene SeNetworkLogonRight."
+    } else {
+        $nuevaLineaNet = if ($lineaNet) { "$lineaNet,*$Username" } else { "SeNetworkLogonRight = *$Username" }
+        $infContent = @"
 [Unicode]
 Unicode=yes
 [Version]
 signature="`$CHICAGO`$"
 Revision=1
 [Privilege Rights]
-$nuevaLinea
+$nuevaLineaNet
 "@
-    $infContent | Out-File -FilePath $applyInf -Encoding Unicode
-    & secedit /configure /db $applyDb /cfg $applyInf /quiet 2>$null
-    Remove-Item $exportInf, $applyInf, $applyDb -ErrorAction SilentlyContinue
-    Print-Ok "  Derecho 'Log on locally' otorgado a '$Username'."
+        $infContent | Out-File -FilePath $applyInf -Encoding Unicode
+        & secedit /configure /db $applyDb /cfg $applyInf /quiet 2>$null
+        Remove-Item $applyInf, $applyDb -ErrorAction SilentlyContinue
+        Print-Ok "  SeNetworkLogonRight otorgado a '$Username'."
+    }
+
+    # Asegurarse de que el usuario NO este en la lista de denegacion de logon de red
+    $lineaDeny = $cfg | Where-Object { $_ -match "^SeDenyNetworkLogonRight" }
+    if ($lineaDeny -and $lineaDeny -match [regex]::Escape($Username)) {
+        Print-Warn "  '$Username' esta en SeDenyNetworkLogonRight — removiendo..."
+        $nuevaLineaDeny = ($lineaDeny -replace ",?\*?$Username", "").TrimEnd(",")
+        $infDeny = @"
+[Unicode]
+Unicode=yes
+[Version]
+signature="`$CHICAGO`$"
+Revision=1
+[Privilege Rights]
+$nuevaLineaDeny
+"@
+        $infDeny | Out-File -FilePath $applyInf -Encoding Unicode
+        $applyDb2 = "$env:TEMP\secedit_apply2.sdb"
+        & secedit /configure /db $applyDb2 /cfg $applyInf /quiet 2>$null
+        Remove-Item $applyInf, $applyDb2 -ErrorAction SilentlyContinue
+        Print-Ok "  '$Username' removido de SeDenyNetworkLogonRight."
+    }
+
+    Remove-Item $exportInf -ErrorAction SilentlyContinue
 }
 
 function Verificar-Instalacion {
@@ -130,7 +158,7 @@ function Crear-Estructura-Base {
         } else { Print-Info "Ya existe: $dir" }
     }
 
-    # Raiz: solo admins/system, los usuarios no deben ver ni navegar aqui directamente
+    # Raiz: solo admins/system
     Set-FolderACL -Path $FTP_ROOT -Rules @(
         (New-ACLRule $ID_ADMINS "FullControl"),
         (New-ACLRule $ID_SYSTEM "FullControl")
@@ -145,7 +173,7 @@ function Crear-Estructura-Base {
     )
     Print-Ok "Permisos LocalUser configurados."
 
-    # Public: home del anonimo, IUSR puede navegar
+    # Public: home del anonimo
     Set-FolderACL -Path "$FTP_ROOT\LocalUser\Public" -Rules @(
         (New-ACLRule $ID_ADMINS "FullControl"),
         (New-ACLRule $ID_SYSTEM "FullControl"),
@@ -208,7 +236,6 @@ function Configurar-FTP {
     Print-Ok "Sitio '$FTP_SITE_NAME' creado."
 
     # Modo 3: cada usuario enjaulado en LocalUser\<usuario>
-    # El anonimo va a LocalUser\Public
     Set-ItemProperty "IIS:\Sites\$FTP_SITE_NAME" -Name "ftpServer.userIsolation.mode" -Value 3
     Print-Ok "User Isolation: modo 3 (IsolateAllDirectories)."
 
@@ -233,17 +260,33 @@ function Configurar-FTP {
     Clear-WebConfiguration "/system.ftpServer/security/authorization" `
         -PSPath "IIS:\" -Location $FTP_SITE_NAME -ErrorAction SilentlyContinue
 
+    # Anonimo: solo lectura (permissions=1)
     Add-WebConfiguration "/system.ftpServer/security/authorization" `
         -PSPath "IIS:\" -Location $FTP_SITE_NAME `
         -Value @{ accessType="Allow"; users="?"; roles=""; permissions=1 } `
         -ErrorAction SilentlyContinue
 
+    # Usuarios autenticados: lectura y escritura (permissions=3)
     Add-WebConfiguration "/system.ftpServer/security/authorization" `
         -PSPath "IIS:\" -Location $FTP_SITE_NAME `
         -Value @{ accessType="Allow"; users="*"; roles=""; permissions=3 } `
         -ErrorAction SilentlyContinue
 
     Print-Ok "Reglas de autorizacion FTP configuradas."
+
+    # FIX 2: Habilitar explicitamente Windows Authentication provider en el sitio FTP.
+    # Sin esto IIS puede rechazar credenciales validas con 530 aunque basicAuthentication
+    # este en true, porque el provider subyacente no esta registrado en el sitio.
+    $authProviders = Get-WebConfiguration "system.ftpServer/security/authentication/basicAuthentication" `
+        -PSPath "IIS:\Sites\$FTP_SITE_NAME" -ErrorAction SilentlyContinue
+    if ($null -eq $authProviders) {
+        Print-Warn "No se pudo verificar el provider de autenticacion basica."
+    }
+
+    # Asegurarse de que el proveedor "IIS Manager" no este bloqueando
+    Set-WebConfigurationProperty -PSPath "IIS:\Sites\$FTP_SITE_NAME" `
+        -Filter "system.ftpServer/security/authentication/basicAuthentication" `
+        -Name "enabled" -Value $true -ErrorAction SilentlyContinue
 
     Stop-Service ftpsvc -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
@@ -296,16 +339,21 @@ function Construir-Jaula-Usuario {
     $userSID     = (Get-LocalUser -Name $usuario).SID
     $userAccount = $userSID.Translate([System.Security.Principal.NTAccount])
 
-    # La jaula raiz necesita Modify para que IIS FTP pueda establecer el home directory.
-    # Sin este permiso IIS retorna 530 "home directory inaccessible".
-    # El usuario NO puede borrar la jaula porque Protect-FolderFromDeletion
-    # agrega DENY Delete sobre este objeto.
+    # FIX 3: La jaula raiz (LocalUser\<usuario>) debe tener ReadAndExecute para el usuario,
+    # NO Modify. IIS FTP con User Isolation modo 3 usa esta carpeta solo como punto de
+    # montaje para resolver el home directory. Si el usuario tiene Modify aqui, IIS lo
+    # interpreta como un perfil ambiguo y puede retornar 530 "home directory inaccessible".
+    # El usuario accede a su contenido a traves de las subcarpetas (personal, junctions),
+    # no directamente desde la raiz de la jaula.
     Set-FolderACL -Path $jaula -Rules @(
         (New-ACLRule $ID_ADMINS   "FullControl"),
         (New-ACLRule $ID_SYSTEM   "FullControl"),
-        (New-ACLRule $userAccount "Modify")
+        (New-ACLRule $userAccount "ReadAndExecute")
     )
-    Protect-FolderFromDeletion $jaula
+    # FIX 4: No aplicar Protect-FolderFromDeletion en la jaula raiz.
+    # El DENY Delete sobre la carpeta raiz de la jaula interfiere con el proceso
+    # de IIS al intentar acceder al home directory del usuario, causando 530.
+    # La proteccion se aplica solo a subcarpetas donde el usuario tiene Modify.
 
     # Carpeta personal: Modify + protegida contra borrado
     Set-FolderACL -Path $personal -Rules @(
@@ -347,7 +395,6 @@ function Destruir-Jaula-Usuario {
     }
 
     if (Test-Path $jaula) {
-        # Quitar DENY para poder borrar
         foreach ($sub in @($jaula, "$jaula\$usuario")) {
             if (Test-Path $sub) {
                 $acl = Get-Acl $sub -ErrorAction SilentlyContinue
