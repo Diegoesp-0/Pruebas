@@ -132,39 +132,31 @@ function crearHTML {
 
 # =============== BUSCAR RUTA NGINX ===============
 function Obtener-Ruta-Nginx {
-    # Buscar nginx.exe real (no el shim de choco en bin\)
-    # Choco instala en: C:\ProgramData\chocolatey\lib
-ginx	ools
-ginx-VERSION    $libPath = "C:\ProgramData\chocolatey\lib
-ginx	ools"
+    # Choco v2 instala en: C:\ProgramData\chocolatey\lib\nginx\tools\nginx-VERSION\
+    $libPath = "C:\ProgramData\chocolatey\lib\nginx\tools"
     if (Test-Path $libPath) {
         $exe = Get-ChildItem $libPath -Filter "nginx.exe" -Recurse `
             -ErrorAction SilentlyContinue -Depth 3 | Select-Object -First 1
         if ($exe) { return $exe.DirectoryName }
     }
-    # Choco v2 puede instalar en C:	ools
-ginx-VERSION    if (Test-Path "C:	ools") {
-        $exe = Get-ChildItem "C:	ools" -Filter "nginx.exe" -Recurse `
+    # Choco v1/herramienta instala en C:\tools\nginx-VERSION\
+    if (Test-Path "C:\tools") {
+        $exe = Get-ChildItem "C:\tools" -Filter "nginx.exe" -Recurse `
             -ErrorAction SilentlyContinue -Depth 5 | Select-Object -First 1
         if ($exe) { return $exe.DirectoryName }
     }
-    # Otras rutas directas
-    foreach ($r in @("C:
-ginx","C:
-ginx
-ginx")) {
-        if (Test-Path "$r
-ginx.exe") { return $r }
+    # Rutas directas alternativas
+    foreach ($r in @("C:\nginx", "C:\nginx\nginx")) {
+        if (Test-Path "$r\nginx.exe") { return $r }
     }
-    # Busqueda amplia — excluir bin\ de choco (es un shim, no el exe real)
-    $exe = Get-ChildItem "C:" -Filter "nginx.exe" -Recurse `
+    # Busqueda amplia - excluir bin\ de choco (es shim, no el exe real)
+    $exe = Get-ChildItem "C:\" -Filter "nginx.exe" -Recurse `
         -ErrorAction SilentlyContinue -Depth 7 |
-        Where-Object { $_.DirectoryName -notmatch "\bin$" } |
+        Where-Object { $_.FullName -notlike "*\bin\*" } |
         Select-Object -First 1
     if ($exe) { return $exe.DirectoryName }
     return $null
 }
-
 # =============== INSTALAR IIS ===============
 function instalarIIS {
     param([int]$puerto)
