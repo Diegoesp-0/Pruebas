@@ -132,14 +132,35 @@ function crearHTML {
 
 # =============== BUSCAR RUTA NGINX ===============
 function Obtener-Ruta-Nginx {
-    $exe = Get-ChildItem "C:\tools" -Filter "nginx.exe" -Recurse `
-        -ErrorAction SilentlyContinue -Depth 3 | Select-Object -First 1
-    if ($exe) { return $exe.DirectoryName }
-    foreach ($r in @("C:\nginx","C:\ProgramData\chocolatey\lib\nginx\tools")) {
-        if (Test-Path "$r\nginx.exe") { return $r }
+    # Buscar nginx.exe real (no el shim de choco en bin\)
+    # Choco instala en: C:\ProgramData\chocolatey\lib
+ginx	ools
+ginx-VERSION    $libPath = "C:\ProgramData\chocolatey\lib
+ginx	ools"
+    if (Test-Path $libPath) {
+        $exe = Get-ChildItem $libPath -Filter "nginx.exe" -Recurse `
+            -ErrorAction SilentlyContinue -Depth 3 | Select-Object -First 1
+        if ($exe) { return $exe.DirectoryName }
     }
-    $exe = Get-ChildItem "C:\" -Filter "nginx.exe" -Recurse `
-        -ErrorAction SilentlyContinue -Depth 5 | Select-Object -First 1
+    # Choco v2 puede instalar en C:	ools
+ginx-VERSION    if (Test-Path "C:	ools") {
+        $exe = Get-ChildItem "C:	ools" -Filter "nginx.exe" -Recurse `
+            -ErrorAction SilentlyContinue -Depth 5 | Select-Object -First 1
+        if ($exe) { return $exe.DirectoryName }
+    }
+    # Otras rutas directas
+    foreach ($r in @("C:
+ginx","C:
+ginx
+ginx")) {
+        if (Test-Path "$r
+ginx.exe") { return $r }
+    }
+    # Busqueda amplia — excluir bin\ de choco (es un shim, no el exe real)
+    $exe = Get-ChildItem "C:" -Filter "nginx.exe" -Recurse `
+        -ErrorAction SilentlyContinue -Depth 7 |
+        Where-Object { $_.DirectoryName -notmatch "\bin$" } |
+        Select-Object -First 1
     if ($exe) { return $exe.DirectoryName }
     return $null
 }
@@ -362,9 +383,17 @@ function instalarNginx {
 
     Write-Info "Instalando Nginx $versionElegida..."
     choco install nginx --version="$versionElegida" --yes --no-progress --force 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { Write-Err "Fallo la instalacion de Nginx. Codigo: $LASTEXITCODE"; return }
+    # choco puede retornar exit 0 aunque no reinstale (ya instalado); no cortar aqui
     Refrescar-Path
-    Write-Ok "Nginx $versionElegida instalado."
+
+    # Verificar que nginx.exe exista antes de continuar
+    $nginxRootCheck = Obtener-Ruta-Nginx
+    if (-not $nginxRootCheck) {
+        Write-Err "No se encontro nginx.exe. Verifica la instalacion de Chocolatey."
+        Write-Info "Intenta manualmente: choco install nginx --version=$versionElegida --force"
+        return
+    }
+    Write-Ok "Nginx $versionElegida disponible en: $nginxRootCheck"
 
     if (-not (Get-Command nssm -ErrorAction SilentlyContinue)) {
         Write-Info "Instalando NSSM..."
