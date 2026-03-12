@@ -112,33 +112,21 @@ function crearHTML {
     if (-not (Test-Path $rutaWeb)) {
         New-Item -ItemType Directory -Path $rutaWeb -Force | Out-Null
     }
+    # Usar WriteAllText con UTF8 sin BOM para evitar errores en nginx/apache
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
     $contenido = @"
 <!DOCTYPE html>
 <html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Servidor HTTP</title>
-    <style>
-        body { background-color: rgb(255,226,231); font-family: Arial, sans-serif;
-               display:flex; justify-content:center; align-items:center; height:100vh; margin:0; }
-        .infoServ { background:rgb(249,181,192); border:1px solid #982f4a;
-                    padding:2rem 3rem; border-radius:8px; text-align:center; color:rgb(80,20,30); }
-        h1 { color:#982f4a; }
-        strong { color:#f44462; }
-    </style>
-</head>
+<head><meta charset="UTF-8"><title>Servidor HTTP - Windows</title></head>
 <body>
-    <div class="infoServ">
-        <h1>Servidor Activo</h1>
-        <p>Servidor: <strong>$servicio</strong></p>
-        <p>Version:  <strong>$version</strong></p>
-        <p>Puerto:   <strong>$puerto</strong></p>
-    </div>
+<h1>Windows - Servidor Activo</h1>
+<p>Servidor: $servicio</p>
+<p>Version: $version</p>
+<p>Puerto: $puerto</p>
 </body>
 </html>
 "@
-    $contenido | Out-File -FilePath "$rutaWeb\index.html" -Encoding UTF8
+    [System.IO.File]::WriteAllText("$rutaWeb\index.html", $contenido, $utf8NoBom)
     Write-Ok "index.html creado en $rutaWeb"
 }
 
@@ -389,20 +377,46 @@ function instalarNginx {
     Write-Info "Nginx encontrado en: $nginxRoot"
 
     $nginxConf = "$nginxRoot\conf\nginx.conf"
-    if (Test-Path $nginxConf) {
-        $conf = Get-Content $nginxConf -Raw
-        $conf = $conf -replace 'listen\s+\d+\s*;', "listen $puerto;"
-        if ($conf -notmatch 'server_tokens') {
-            $conf = $conf -replace '(http\s*\{)', "`$1`n    server_tokens off;"
+    # Escribir nginx.conf completo sin BOM (BOM causa "unknown directive" en nginx)
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    $nginxConfContent = @"
+worker_processes  1;
+
+events {
+    worker_connections  1024;
+}
+
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+
+    server_tokens off;
+
+    sendfile        on;
+    keepalive_timeout  65;
+
+    server {
+        listen       $puerto;
+        server_name  localhost;
+
+        add_header X-Frame-Options SAMEORIGIN always;
+        add_header X-Content-Type-Options nosniff always;
+
+        location / {
+            root   html;
+            index  index.html index.htm;
+            autoindex off;
         }
-        if ($conf -notmatch 'X-Frame-Options') {
-            $conf = $conf -replace '(server\s*\{)', "`$1`n        add_header X-Frame-Options SAMEORIGIN always;`n        add_header X-Content-Type-Options nosniff always;"
+
+        error_page   500 502 503 504  /50x.html;
+        location = /50x.html {
+            root   html;
         }
-        Set-Content $nginxConf $conf -Encoding UTF8
-        Write-Ok "Puerto $puerto y seguridad configurados en nginx.conf."
-    } else {
-        Write-Err "No se encontro nginx.conf en $nginxRoot\conf"
     }
+}
+"@
+    [System.IO.File]::WriteAllText($nginxConf, $nginxConfContent, $utf8NoBom)
+    Write-Ok "nginx.conf escrito sin BOM, puerto $puerto configurado."
 
     crearHTML -rutaWeb "$nginxRoot\html" -servicio "Nginx" -version $versionElegida -puerto $puerto
     configurarFirewall -puertoNuevo $puerto -puertoViejo 80 -nombreServicio "Nginx"
